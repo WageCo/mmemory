@@ -1,8 +1,6 @@
 #include <gtest/gtest.h>
 #include <stdlib.h>
 
-#include <random>
-
 #include "mmemory.h"
 
 // 需要安装 gtest
