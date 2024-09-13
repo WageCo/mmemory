@@ -164,11 +164,11 @@ void free(void *addr) {
 }
 
 // custom calloc
-void *calloc(size_t num, size_t nsize) {
-  if (!num || !nsize) {
+void *calloc(size_t num, size_t size) {
+  if (!num || !size) {
     return nullptr;
   }
-  size_t total_size = num * nsize;
+  size_t total_size = num * size;
   void *addr = malloc(total_size);
   if (!addr) {
     return nullptr;

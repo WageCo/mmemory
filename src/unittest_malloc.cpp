@@ -40,7 +40,3 @@ TEST(testMalloc, MallocTest) {
 TEST(testMalloc, MyMallocTest) {
   test_my_malloc(const_test);
 }
-int main() {
-  testing::InitGoogleTest();
-  return RUN_ALL_TESTS();
-}

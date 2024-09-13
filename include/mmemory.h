@@ -4,7 +4,7 @@
 namespace wageco {
 void *malloc(size_t size);
 void free(void *addr);
-void *calloc(size_t num, size_t nsize);
+void *calloc(size_t num, size_t size);
 void *realloc(void *addr, size_t size);
 }  // namespace wageco
 
