@@ -1,6 +1,6 @@
-# GitHub Actions CI: Linux 上构建 + 单元测试 + 快速基准
-# 依赖策略: 通过 apt 安装 libgtest-dev / libbenchmark-dev (find_package 优先路径),
-#           不使用子模块; 子模块仅在本地"无系统库"时作为兜底。
+# GitHub Actions CI: Linux 上构建 + 单元测试 + 格式检查 + 快速基准
+# 依赖策略: 通过 apt 安装 libgtest-dev / libbenchmark-dev / libspdlog-dev
+#           (find_package 优先路径), 不使用子模块; 子模块仅在本地"无系统库"时兜底。
 name: CI
 
 on:
@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libgtest-dev libbenchmark-dev libspdlog-dev
+          sudo apt-get install -y build-essential cmake clang-format libgtest-dev libbenchmark-dev libspdlog-dev
 
       - name: Configure
         run: cmake -S . -B build
@@ -26,8 +26,15 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
 
-      - name: Run unit tests
-        run: ./build/CustomMemory
+      - name: Run unit tests (wageco + system, process-isolated)
+        run: |
+          ./build/CustomMemory
+          ./build/CustomMemory_system
 
-      - name: Run benchmark (short)
-        run: ./build/CustomMemory_bench --benchmark_min_time=0.1s
+      - name: Check formatting
+        run: cmake --build build --target check-format
+
+      - name: Run benchmark (short, wageco + system)
+        run: |
+          ./build/CustomMemory_bench --benchmark_min_time=0.1s
+          ./build/CustomMemory_bench_system --benchmark_min_time=0.1s

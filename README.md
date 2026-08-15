@@ -1,33 +1,38 @@
 # MMEMORY
 
-A simple stack memory allocator. 教学演示用简易内存分配器。
+A simple memory allocator. 教学演示用简易内存分配器。
 
-底层用了 2 个双向循环链表,分别表示**已分配**以及**释放**的空间:分配时优先复用空闲链表中的块(first-fit + 分割),不够再向操作系统要;释放时合并物理相邻的空闲块,堆顶的块直接归还操作系统。
+把真实 malloc 的核心机制(系统调用申请内存、块元数据、空闲块复用、碎片合并)用最少代码演示清楚,并带**依赖注入架构**:分配器 = **存储模式 + 内存申请 + 查找策略** 三个可注入依赖的组合,每个维度都可替换。
 
-实属逆向优化 :D —— 它把真实 malloc 的核心机制(系统调用申请内存、块头元数据、链表管理、碎片合并)用最少代码演示清楚,但不做任何性能优化。
+实属逆向优化 :D —— 教学为主,不做任何性能优化。
 
 ## 原理速览
 
 ```
-内存布局 (每个块):
-  [ header_t (16B: size + pre/next 指针) | 用户可用数据区 (size 字节) ]
-  返回给用户的指针 = header 之后的位置
+内存布局 (每个块, 物理解耦/边界 tag 思路, 同 dlmalloc):
+  [ block_t (16B: size + inuse) | 用户可用数据区 (size 字节) ]
+  已分配: 用户区全是数据
+  空闲:   用户区前 16B 复用为链表节点 ListNode (零节点开销)
+  返回给用户的指针 = block_t 之后的位置
+  没有"已分配链表": 块是否已分配由 inuse 标志标识
 
 分配 malloc(n):
   1. 总占用 = (16 + n) 向上对齐到 16 字节
-  2. 空闲链表 first-fit 找一块够大的
+  2. 按注入的查找策略 (FirstFit/BestFit) 在空闲链表中找一块够大的
        ├─ 命中: 块过大则 split 分割, 剩余部分放回空闲链表
-       └─ 未命中: sbrk() 向操作系统申请新堆空间
-  3. 挂到已分配链表, 返回用户区指针
+       └─ 未命中: 通过内存提供者 (IMemory/sbrk) 申请新堆空间
+  3. 标记 inuse=true, 返回用户区指针
 
 释放 free(p):
-  1. 指针回退 16 字节拿到 header, 校验 (防 double free / 非法指针)
-  2. 从已分配链表摘除
-  3. 合并物理相邻的空闲块 (前驱/后继), 缓解碎片
-  4. 位于堆顶 → sbrk(-) 归还 (连带回收下方连续空闲块)
-     否则 → 挂回空闲链表等待复用
+  1. 校验: 地址在提供者空间内 (owns_address) + inuse 标志 (防 double free)
+  2. 合并物理相邻的空闲块 (链表查找, 不假设堆形状)
+  3. 释放委托给内存提供者 (IMemory):
+       - 支持随机释放 (如 mmap) → 直接归还
+       - 否则 (如 sbrk 栈式) → 按"申请顺序反向释放": 只有物理上贴住
+         当前边界的块能归还, 成功后连带其下方紧邻空闲块继续反向归还;
+         失败则挂回空闲链表复用
 
-calloc = malloc + 清零;  realloc = 扩容时新分配 + 拷贝 + 释放旧块
+calloc = malloc + 清零 (含溢出检查);  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 ```
 
 ## 目录结构
@@ -35,21 +40,71 @@ calloc = malloc + 清零;  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 ```
 .
 ├── CMakeLists.txt
-├── include/
-│   ├── mmemory.h           # 对外接口 (wageco::malloc/free/calloc/realloc)
-│   └── internal.h          # 内部共享 (非公共接口): 块头 / HeaderList 链表 / 日志配置
+├── include/                     # 头文件统一放这里 (内部头非公共接口)
+│   ├── mmemory.h                # 对外接口 (wageco::malloc/free/calloc/realloc)
+│   ├── logging.h                # 日志配置 (SPDLOG_ACTIVE_LEVEL) + get_logger
+│   ├── list.h                   # 链表层: ListNode / IList / HeaderList
+│   ├── block.h                  # 块层: block_t / 块-节点互转 helpers
+│   ├── memory.h                 # 内存提供者层: IMemory / SbrkMemory
+│   ├── find_strategy.h          # 查找策略层: IFindStrategy / FirstFit / BestFit
+│   ├── allocator.h              # 分配器层: Allocator
+│   └── internal.h               # 聚合总头 (src/*.cpp 使用)
 ├── libs/
-│   ├── googletest/         # 子模块 (系统无 gtest 时兜底)
-│   ├── benchmark/          # 子模块 (系统无 benchmark 时兜底)
-│   └── spdlog/             # 子模块 (系统无 spdlog 时兜底)
+│   ├── googletest/              # 子模块 (系统无 gtest 时兜底)
+│   ├── benchmark/               # 子模块 (系统无 benchmark 时兜底)
+│   └── spdlog/                  # 子模块 (系统无 spdlog 时兜底)
 ├── src/
-│   ├── mmemory.cpp         # 核心 API: malloc/free/calloc/realloc + 全局状态
-│   ├── log.cpp             # 日志系统实现 (spdlog)
-│   └── list.cpp            # HeaderList 链表实现
+│   ├── mmemory.cpp              # 组合根: 装配依赖 + 4 个公共 API 转发
+│   ├── allocator.cpp            # Allocator: 存储模式×内存申请×查找策略 的组合逻辑
+│   ├── list.cpp                 # HeaderList: 双向循环链表 (存储模式实现)
+│   ├── memory.cpp               # SbrkMemory: sbrk/brk 封装 (内存申请实现)
+│   ├── log.cpp                  # 日志系统实现 (spdlog)
+│   └── override.cpp             # 链接期接管系统 malloc (仅 MMEMORY_OVERRIDE_MALLOC=ON)
 └── test/
-    ├── unittest_malloc.cpp # gtest 单元测试
-    └── bench_malloc.cpp    # google benchmark 对比基准
+    ├── unittest_malloc.cpp      # gtest 单元测试 (单份代码, 宏切换命名空间)
+    └── bench_malloc.cpp         # google benchmark 对比基准 (同上)
 ```
+
+## 架构与依赖注入
+
+分配器 = **存储模式 + 内存申请 + 查找策略** 三个可注入依赖的组合(策略模式):
+
+```
+ListNode               链表节点 (pre/next, 独立定义; 复用空闲块用户区前 16B)
+   ↑
+IList                  存储模式抽象接口 (insert/remove/find_first_fit/contains/物理相邻/for_each)
+   ↑ 继承
+HeaderList : IList     双向循环链表 (唯一的一条"空闲链表"; 通过 SizeFn 回调取块大小)
+
+IMemory                内存提供者能力契约 (任意来源: sbrk/mmap/池)
+  ├─ allocate(size)                       申请
+  ├─ supports_random_release()            是否支持随机释放
+  ├─ release_block(addr, size)            归还一块 (随机/反向由提供者决定)
+  └─ owns_address(addr)                   地址是否在本提供者空间内 (free 校验)
+   ↑ 继承
+SbrkMemory              基于 sbrk/brk 的实现 (反向释放: 物理贴边界才归还)
+
+IFindStrategy           空闲块查找策略
+  ├─ FirstFit : 第一个 size>=需求 的块 (快)
+  └─ BestFit  : size>=需求 且最小 的块 (碎片最小, 全表扫描)
+
+Allocator(IList*, IMemory*, IFindStrategy*)   ← 三个依赖注入
+   ↑
+wageco::malloc/free/calloc/realloc    ← 转发到全局 g_allocator
+```
+
+**物理解耦(边界 tag 思路,同 dlmalloc)**:
+
+- `block_t`(16B)只存 `size + inuse`,不内嵌链表节点;
+- **空闲块**的用户区前 16 字节复用为 `ListNode`(空闲块没有用户数据,节点零开销);**已分配块**用户区全给数据;
+- 因此没有"已分配链表":`free` 用 `inuse` + `owns_address` 校验,物理相邻的空闲块通过链表查找定位。
+
+**可替换性**:
+
+- 换存储模式(如按大小分 bin)→ 提供新的 `IList` 实现,分配器零改动;
+- 换内存策略(如 mmap 大块映射,支持随机释放)→ 提供新的 `IMemory` 实现,分配器零改动;
+- 换查找策略(FirstFit ↔ BestFit)→ 组合根换一个对象即可;
+- `src/mmemory.cpp` 是唯一装配点(组合根)。
 
 ## 构建与测试
 
@@ -62,15 +117,24 @@ googletest / google-benchmark / spdlog **优先使用系统安装版**(`find_pac
 git clone --recurse-submodules https://github.com/your-name/mmemory.git
 cd mmemory
 
-# 或已克隆后手动初始化子模块
-git submodule update --init --recursive
-
-# 构建 + 测试 + 基准
+# 构建
 cmake -S . -B build
 cmake --build build -j$(nproc)
-./build/CustomMemory          # 单元测试
-./build/CustomMemory_bench    # 性能对比基准
 ```
+
+产出**四个可执行文件**(测试/基准为单份代码,宏 `MMEMORY_TEST_CUSTOM` 切换命名空间):
+
+```bash
+# 单元测试
+./build/CustomMemory           # 测 wageco 分配器 (宏定义, 10 个用例)
+./build/CustomMemory_system    # 测系统 malloc 对照 (无宏, 6 个用例)
+
+# 性能基准 (两者输出并排对比)
+./build/CustomMemory_bench --benchmark_min_time=0.1s
+./build/CustomMemory_bench_system --benchmark_min_time=0.1s
+```
+
+> 本库独占堆、与系统 malloc 互斥,因此"系统对照"与"本库测试"拆成独立可执行文件(进程级隔离),避免断点互相干扰。可选链接期接管:`cmake -S . -B build -DMMEMORY_OVERRIDE_MALLOC=ON`(见"已知限制")。
 
 > 提示:Windows + WSL2 场景,建议在 WSL 内构建(把仓库 clone 到 WSL 自己的文件系统,避免 `/mnt/c` 的 9P 桥接性能损耗)。
 
@@ -78,80 +142,117 @@ cmake --build build -j$(nproc)
 
 环境:WSL2 Ubuntu, gcc 15.2.0, googletest 1.17.0
 
+### CustomMemory(wageco 分配器,10 个用例)
+
 ```
-[==========] Running 5 tests from 1 test suite.
-[----------] 5 tests from testMalloc
-[ RUN      ] testMalloc.MallocTest                [       OK ] (0 ms)
-[ RUN      ] testMalloc.MyMallocTest              [       OK ] (84 ms)
-[ RUN      ] testMalloc.ReallocTest               [       OK ] (0 ms)
-[ RUN      ] testMalloc.DoubleFreeTest            [       OK ] (0 ms)
-[ RUN      ] testMalloc.FragmentationShrinkTest   [       OK ] (3091 ms)
-[----------] 5 tests from testMalloc (3176 ms total)
-[  PASSED  ] 5 tests.
+[==========] Running 10 tests from 1 test suite.
+[ RUN      ] testMalloc.StressTest               [       OK ] (88 ms)
+[ RUN      ] testMalloc.AlignmentTest            [       OK ] (0 ms)
+[ RUN      ] testMalloc.BoundarySizeTest         [       OK ] (0 ms)
+[ RUN      ] testMalloc.CallocTest               [       OK ] (0 ms)
+[ RUN      ] testMalloc.DataIntegrityTest        [       OK ] (0 ms)
+[ RUN      ] testMalloc.ChurnTest                [       OK ] (6 ms)
+[ RUN      ] testMalloc.ReallocTest              [       OK ] (0 ms)
+[ RUN      ] testMalloc.DoubleFreeTest           [       OK ] (0 ms)
+[ RUN      ] testMalloc.FragmentationShrinkTest  [       OK ] (1339 ms)
+[ RUN      ] testMalloc.BestFitTest              [       OK ] (0 ms)
+[  PASSED  ] 10 tests.
 ```
 
 | 测试 | 验证内容 |
 |---|---|
-| MallocTest | 系统 malloc 压力测试(3.2M 次分配/释放) |
-| MyMallocTest | 自定义分配器同模式压力测试 |
-| ReallocTest | realloc 扩容内容保留 + `realloc(ptr, 0)` 释放语义 |
-| DoubleFreeTest | double free 防御:第二次释放被检测并安全忽略(不崩溃) |
-| FragmentationShrinkTest | 20000 块乱序释放后堆完整回收(碎片合并验证) |
+| StressTest | 3.2M 次同模式分配/释放(宏切换:系统或 wageco) |
+| AlignmentTest | 返回指针 16 字节对齐(8 种大小) |
+| BoundarySizeTest | malloc(0) / 1B / 1MB 大块边界 |
+| CallocTest | calloc 清零 + 乘法溢出返回 NULL |
+| DataIntegrityTest | 64 块相邻写模式互不覆盖 |
+| ChurnTest | 2 万次随机混合分配/释放 + 数据完好校验 |
+| ReallocTest | 扩容内容保留 + `realloc(ptr, 0)` 释放语义 |
+| DoubleFreeTest | double free 防御(仅本库,系统下是 UB) |
+| FragmentationShrinkTest | 20000 块乱序释放后堆完整回收 |
+| BestFitTest | BestFit 查找策略注入与分配正确性 |
 
-## Benchmark 结果(自定义分配器 vs 系统 malloc)
+### CustomMemory_system(系统 malloc 对照,6 个用例)
+
+共享通用用例(Stress / Alignment / Boundary / Calloc / DataIntegrity / Churn),1 个测试套件,全部通过。库专有回归(double free 等)不参与系统对照。
+
+> **DEBUG 构建额外能力**:`-DDEBUG` 构建(如 `cmake -DCMAKE_CXX_FLAGS=-DDEBUG`)时,程序退出会打印:
+> - `MEMORY LEAK DETECTED: N block(s)...`(未释放块清单)或 `no memory leaks`;
+> - `sbrk provider: allocated ... released ... outstanding ...`(提供者字节统计)。
+
+## Benchmark 结果(wageco vs 系统 malloc)
 
 > **环境与复现**:以下数据来自本项目开发机实测,`数值随 CPU / 编译器 / 系统库版本变化`,仅供量级参考。
-> 复现方式:
+> 复现:
 > ```bash
-> cmake -S . -B build && cmake --build build -j$(nproc)
 > ./build/CustomMemory_bench --benchmark_min_time=0.1s
+> ./build/CustomMemory_bench_system --benchmark_min_time=0.1s
 > ```
 > 实测环境:WSL2 Ubuntu, 22 × 2.995 GHz, gcc 15.2.0, google-benchmark, 单次采样 0.1s
 
 ```
-Benchmark                                   Time             CPU   Iterations
------------------------------------------------------------------------------
-BM_System_MallocFree/8                    4.96 ns         4.97 ns     28361922
-BM_System_MallocFree/64                   5.04 ns         5.04 ns     28001604
-BM_System_MallocFree/512                  5.13 ns         5.13 ns     26194524
-BM_System_MallocFree/4096                 13.2 ns         13.2 ns     10943427
-BM_Custom_MallocFree/8                    4231 ns         4231 ns        33541
-BM_Custom_MallocFree/64                   3904 ns         3904 ns        35896
-BM_Custom_MallocFree/512                  4138 ns         4138 ns        32116
-BM_Custom_MallocFree/4096                 4300 ns         4300 ns        31636
-BM_System_Batch/8                         4219 ns         4220 ns        30361
-BM_System_Batch/64                        4048 ns         4048 ns        34862
-BM_System_Batch/512                       4183 ns         4183 ns        35215
-BM_System_Batch/4096                    198378 ns       198136 ns          682
-BM_Custom_Batch/8                        74796 ns        74512 ns         1762
-BM_Custom_Batch/64                       76377 ns        76099 ns         1715
-BM_Custom_Batch/512                     105529 ns       105288 ns         1000
-BM_Custom_Batch/4096                    387640 ns       387580 ns          390
-BM_System_MallocFree_MT/8/threads:1       5.05 ns         5.05 ns     28123729
-BM_System_MallocFree_MT/8/threads:4       5.27 ns         5.27 ns     25003392
-BM_Custom_MallocFree_MT/8/threads:1       5541 ns         5542 ns        25906
-BM_Custom_MallocFree_MT/8/threads:4      10672 ns         3728 ns        46960
+CustomMemory_bench (wageco):
+Benchmark                            Time             CPU   Iterations
+----------------------------------------------------------------------
+BM_AllocFree/8                    9520 ns         9520 ns        15469
+BM_AllocFree/64                  10682 ns        10683 ns        10000
+BM_AllocFree/512                  9581 ns         9581 ns        13255
+BM_AllocFree/4096                 9237 ns         9238 ns        12257
+BM_Batch/8                       34752 ns        34752 ns         3910
+BM_Batch/64                      39692 ns        39693 ns         3634
+BM_Batch/512                     74135 ns        74137 ns         1950
+BM_Batch/4096                   320895 ns       320883 ns          500
+BM_AllocFree_MT/8/threads:1       4671 ns         4671 ns        31498
+BM_AllocFree_MT/8/threads:4       8794 ns         3444 ns        32876
+BM_RandomSize                     5798 ns         5798 ns        25307
+BM_AllocHold/64                   33.9 ns         33.9 ns      4247850
+BM_AllocHold/1024                 33.7 ns         33.8 ns      4334267
+BM_Churn                          2889 ns         2889 ns        44684
+
+CustomMemory_bench_system (系统 malloc):
+Benchmark                            Time             CPU   Iterations
+----------------------------------------------------------------------
+BM_AllocFree/8                    5.08 ns         5.08 ns     27645353
+BM_AllocFree/64                   4.98 ns         4.98 ns     28535463
+BM_AllocFree/512                  4.95 ns         4.95 ns     28001886
+BM_AllocFree/4096                 13.8 ns         13.8 ns      9860635
+BM_Batch/8                        4022 ns         4022 ns        34855
+BM_Batch/64                       4071 ns         4071 ns        35327
+BM_Batch/512                      3815 ns         3815 ns        35093
+BM_Batch/4096                   185810 ns       185663 ns          742
+BM_AllocFree_MT/8/threads:1       4.91 ns         4.91 ns     28242964
+BM_AllocFree_MT/8/threads:4       5.35 ns         5.34 ns     26538348
+BM_RandomSize                     17.9 ns         17.9 ns      8611617
+BM_AllocHold/64                   4.04 ns         4.04 ns     34900138
+BM_AllocHold/1024                 4.11 ns         4.11 ns     37172336
+BM_Churn                          9.73 ns         9.73 ns     11466786
 ```
 
 ### 结果解读
 
 | 场景 | 系统 malloc | wageco | 差距 |
 |---|---|---|---|
-| 单次分配+释放 (8B) | 4.96 ns | 4,231 ns | ~**850×** |
-| 单次分配+释放 (4096B) | 13.2 ns | 4,300 ns | ~326× |
-| 批量 256×8B | 4,219 ns | 74,796 ns | ~18× |
-| 批量 256×4096B | 198,378 ns | 387,640 ns | ~2.0× |
-| 多线程 4 线程 (8B) | 5.27 ns | 10,672 ns(总) | 并发无扩展 |
+| 单次分配+释放 (8B) | 5.08 ns | 9,520 ns | ~**1870×** |
+| 单次分配+释放 (4096B) | 13.8 ns | 9,237 ns | ~670× |
+| 批量 256×8B | 4,022 ns | 34,752 ns | ~8.6× |
+| 批量 256×4096B | 185,810 ns | 320,895 ns | ~1.7× |
+| 随机大小 (LCG) | 17.9 ns | 5,798 ns | ~320× |
+| Churn (随机交替) | 9.73 ns | 2,889 ns | ~300× |
+| 稳态占用 AllocHold/64 | 4.04 ns | 33.9 ns | ~8.4× |
+| 多线程 4 线程 (8B) | 5.35 ns | 8,794 ns(总) | 并发无扩展 |
 
-差距来自三处"每次必付"的固定成本:
+差距来自"每次必付"的固定成本:
 
 1. **每次分配都可能 `sbrk` 系统调用**(µs 级);系统 malloc 命中 tcache 后零系统调用;
-2. **释放时 O(n) 链表遍历**(合法性校验 + 前后邻居查找 ×2),块越多越慢;
-3. **全局互斥锁**:4 线程下总耗时反而上升(5541→10672 ns),并发被串行化——系统 malloc 用 per-thread arena/tcache 规避了这点。
+2. **释放时的校验与合并**(`owns_address` + 空闲链表物理相邻查找),块越多越慢;
+3. **全局互斥锁**:4 线程下总耗时反而上升(4671→8794 ns),并发被串行化——系统 malloc 用 per-thread arena/tcache 规避了这点。
 
-批量场景差距缩小(合并与堆顶回收摊薄了 sbrk 次数),大块(4096B)最接近——此时系统 malloc 也走 mmap/大块路径,双方成本结构相似。
+差距缩小/特殊的场景:
 
-> 这正是教学意义所在:这些数字直观展示了真实分配器为什么要做 **tcache / per-thread arena / 无锁设计**。
+- **批量场景差距缩小到 ~2-9×**:批量释放触发合并与反向释放,`sbrk` 次数摊薄;大块(4096B)最接近——此时系统 malloc 也走 mmap/大块路径,双方成本结构相似;
+- **AllocHold 稳态占用 wageco 只要 ~34 ns**:保持 1024 块存活、每轮替换一个,空闲链表稳定命中(first-fit 快速路径),不再每次 `sbrk`——说明"复用为主"的稳态场景差距大幅缩小。
+
+> 这正是教学意义所在:这些数字直观展示了真实分配器为什么要做 **tcache / per-thread arena / 无锁设计**,也展示了"空闲复用为主"时分配器可以接近系统水平。
 
 ## 日志
 
@@ -159,15 +260,18 @@ BM_Custom_MallocFree_MT/8/threads:4      10672 ns         3728 ns        46960
 
 | 级别 | 内容 |
 |---|---|
-| `error` | 失败路径:malloc/sbrk 失败、double free、calloc 溢出、sbrk 收缩失败 |
+| `error` | 失败路径:malloc 过大/失败、double free、calloc 溢出、释放失败 |
 | `debug` | 主流程:malloc 请求/复用/新块、free 入口、realloc 扩容 |
-| `trace` | 细节:块分割(split)、前后邻居合并(coalesce)、堆顶连带回收、挂回空闲链表、calloc/realloc 数据操作 |
+| `trace` | 细节:块分割(split)、前后邻居合并(coalesce)、挂回空闲链表、calloc/realloc 数据操作 |
+| `info` | DEBUG 构建:退出时泄漏检测 / 分配统计 / 提供者字节统计 |
 
 - `error` 始终可见;`debug` 默认不显示(`DEBUG` 编译时默认显示);`trace` 需显式开启;
 - **编译期剥离**:日志用 `SPDLOG_LOGGER_*` 宏 + `SPDLOG_ACTIVE_LEVEL` 控制——
   Release 构建下 `debug`/`trace` 在编译期完全消除(参数不求值、零开销),
   保证 benchmark 测量的是纯分配器逻辑;查看 `debug`/`trace` 日志需 `-DDEBUG` 构建
   (如 `cmake -DCMAKE_CXX_FLAGS=-DDEBUG`);`error` 日志两种构建都有;
+- **进程生命周期 logger**:`get_logger()` 返回空删除器别名,logger 永不析构,
+  因此程序退出时(全局对象析构阶段)的泄漏检测/统计打印依然安全;
 - 环境变量可覆盖:
   - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
   - `MMEMORY_LOG_FILE=<path>` — 指定时改为追加模式写文件;未指定则输出到 stderr
@@ -181,13 +285,14 @@ BM_Custom_MallocFree_MT/8/threads:4      10672 ns         3728 ns        46960
 MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
 ```
 
-```bash
-# 查看分配/释放日志并落地到文件
-MMEMORY_LOG_LEVEL=debug MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
-```
-
 ## 已知限制
 
+- **sbrk/brk 独占堆**:默认内存提供者 `SbrkMemory` 使用 `sbrk`,操作的是**进程级全局断点**——
+  断点被外部移动会导致反向释放错乱。因此本库**不适合与系统 malloc 混用**。两种正确用法:
+  1. **独占假设(默认)**:只用 `wageco::malloc/free` 等命名空间 API,进程内不使用系统 malloc / 其他 sbrk 使用者(教学、自用);
+  2. **链接期接管(强制互斥)**:构建时 `-DMMEMORY_OVERRIDE_MALLOC=ON`,库导出 `__wrap_malloc/free/calloc/realloc`,
+     可执行文件链接 `-Wl,--wrap=malloc,...` —— 进程内**所有** `malloc` 调用(含第三方库)统一重定向到本库,
+     与系统 malloc 在链接期互斥,不存在混用(tcmalloc/jemalloc 的替换机制);
 - 仅支持 Linux(`sbrk` + `pthread`,Windows/MSVC/MinGW 无法编译);
 - 单全局锁,多线程无扩展性;
 - 链表 O(n) 查找,无 bin 分级 / 哈希索引;
