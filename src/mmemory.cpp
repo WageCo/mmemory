@@ -14,30 +14,66 @@
 //   与系统 malloc 相比, 它没有 tcache / per-thread arena 等加速机制,
 //   每次分配都可能有 sbrk 系统调用, 释放时链表查找是 O(n) 的,
 //   并发全靠一把全局互斥锁串行化 —— 详见 README 中的 benchmark 对比。
+//
+// 日志: 使用 spdlog, 默认输出到彩色 stderr。
+//   级别: DEBUG 编译默认 debug, 否则 info; 环境变量可覆盖:
+//     MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
+//     MMEMORY_LOG_FILE=<path>  追加模式同时写文件
 // ============================================================================
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include <memory>
+#include <vector>
+
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stderr_color_sinks.h>
 
 namespace wageco
 {
+// ----------------------------------------------------------------------------
+// 日志系统 (教学示例: spdlog 的 sink 组合 + 级别配置)
+//   - 默认输出到彩色 stderr; 级别: DEBUG 编译默认 debug, 否则 info
+//   - 环境变量可覆盖:
+//       MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
+//       MMEMORY_LOG_FILE=<path>   追加模式同时输出到文件
+// ----------------------------------------------------------------------------
+std::shared_ptr<spdlog::logger> get_logger()
+{
+    static std::shared_ptr<spdlog::logger> logger = []() {
+        // sink 1: 彩色 stderr 输出
+        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        std::vector<spdlog::sink_ptr> sinks{stderr_sink};
+
+        // sink 2 (可选): 追加模式文件输出
+        const char *file_path = std::getenv("MMEMORY_LOG_FILE");
+        if (file_path && *file_path)
+        {
+            auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(file_path, true);
+            sinks.push_back(file_sink);
+        }
+
+        auto l = std::make_shared<spdlog::logger>("mmemory", sinks.begin(), sinks.end());
 #ifdef DEBUG
-// -DDEBUG 编译时启用 spdlog 的 debug 级别输出
-// (spdlog 默认级别为 info, debug 日志默认不显示)
-namespace
-{
-bool enable_spdlog_debug()
-{
-    spdlog::set_level(spdlog::level::debug);
-    return true;
-}
-const bool spdlog_debug_enabled = enable_spdlog_debug();
-} // namespace
+        l->set_level(spdlog::level::debug); // 调试构建默认输出 debug 级别
+#else
+        l->set_level(spdlog::level::info);  // 发布构建默认 info 及以上
 #endif
+        const char *level_str = std::getenv("MMEMORY_LOG_LEVEL");
+        if (level_str && *level_str)
+        {
+            l->set_level(spdlog::level::from_str(level_str));
+        }
+        l->flush_on(spdlog::level::info); // 教学: info 及以上立即落盘
+        return l;
+    }();
+    return logger;
+}
 // ----------------------------------------------------------------------------
 // 块头 (header) 与对齐
 // ----------------------------------------------------------------------------
@@ -259,7 +295,7 @@ void *malloc(size_t size)
     // failed
     if (now_addr == (void *)-1)
     {
-        spdlog::error("malloc failed, errno: {} ({})", errno, strerror(errno));
+        get_logger()->error("malloc failed, errno: {} ({})", errno, strerror(errno));
         pthread_mutex_unlock(&list_locker);
         return nullptr;
     }
@@ -269,9 +305,7 @@ void *malloc(size_t size)
     list_insert(stack_memory_list.malloc_header, node);
     ++stack_memory_list.malloc_size;
     pthread_mutex_unlock(&list_locker);
-#ifdef DEBUG
-    spdlog::debug("malloc: alloc {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
-#endif
+    get_logger()->debug("malloc: alloc {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
     // remove header: 用户只看到 header 之后的区域
     return (void *)(node + 1);
 }
@@ -296,7 +330,7 @@ void free(void *addr)
     // 合法性校验: 已在空闲链表 (double free) 或不在已分配链表 (非法指针)
     if (list_find(stack_memory_list.free_header, node) || !list_find(stack_memory_list.malloc_header, node))
     {
-        spdlog::error("free: double free or no malloc, start: {:p}", (void *)node);
+        get_logger()->error("free: double free or no malloc, start: {:p}", (void *)node);
         pthread_mutex_unlock(&list_locker);
         return;
     }
@@ -346,13 +380,11 @@ void free(void *addr)
         }
         // 回收链整体视为一块: 更新最底块的 size (供收缩失败时放回空闲链表)
         p->head.size = reclaim - sizeof(header_t);
-#ifdef DEBUG
-        spdlog::debug("free: reclaim {} bytes, start: {:p}", reclaim, (void *)sbrk(0));
-#endif
+        get_logger()->debug("free: reclaim {} bytes, start: {:p}", reclaim, (void *)sbrk(0));
         // free memory space: sbrk 传负数表示把断点下移 (归还内存)
         if (sbrk(0 - reclaim) == (void *)-1)
         {
-            spdlog::error("free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
+            get_logger()->error("free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
             // 归还失败: 把整条回收链放回空闲链表, 避免内存丢失
             list_insert(stack_memory_list.free_header, p);
             ++stack_memory_list.free_size;

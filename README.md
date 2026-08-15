@@ -146,6 +146,21 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
 
 > 这正是教学意义所在:这些数字直观展示了真实分配器为什么要做 **tcache / per-thread arena / 无锁设计**。
 
+## 日志
+
+使用 spdlog,默认输出到**彩色 stderr**:
+
+- 错误(如 `double free`、`sbrk` 失败)用 `error` 级别,始终可见;
+- 分配/释放细节用 `debug` 级别,默认不显示(`DEBUG` 编译时默认显示);
+- 环境变量可覆盖:
+  - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
+  - `MMEMORY_LOG_FILE=<path>` — 追加模式同时写入文件(演示 spdlog 多 sink 组合)
+
+```bash
+# 查看分配/释放日志并落地到文件
+MMEMORY_LOG_LEVEL=debug MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
+```
+
 ## 已知限制
 
 - 仅支持 Linux(`sbrk` + `pthread`,Windows/MSVC/MinGW 无法编译);
