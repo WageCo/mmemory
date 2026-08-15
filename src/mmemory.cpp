@@ -15,7 +15,7 @@
 //   每次分配都可能有 sbrk 系统调用, 释放时链表查找是 O(n) 的,
 //   并发全靠一把全局互斥锁串行化 —— 详见 README 中的 benchmark 对比。
 //
-// 日志: 使用 spdlog (仅 <spdlog/spdlog.h> 核心 API)。
+// 日志: 使用 spdlog (核心 API + 工厂函数, 见下方 get_logger)。
 //   默认 stderr 输出; 级别: DEBUG 编译默认 debug, 否则 info; 环境变量可覆盖:
 //     MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
 //     MMEMORY_LOG_FILE=<path>  指定则改为写文件 (追加), 否则 stderr
@@ -30,18 +30,19 @@
 #include <memory>
 
 #include <spdlog/spdlog.h>
+// 注意: spdlog 1.17.0 中 stderr_logger_mt 声明在 stdout_sinks.h,
+//       basic_logger_mt 声明在 basic_file_sink.h (不存在 stderr_sinks.h)
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_sinks.h>
 
 namespace wageco
 {
 // ----------------------------------------------------------------------------
-// 日志系统 (教学示例: spdlog 核心 API, 不依赖任何 sinks/ 头文件)
+// 日志系统 (教学示例: spdlog 核心 API)
 //   - 默认 stderr 输出; 级别: DEBUG 编译默认 debug, 否则 info
 //   - 环境变量可覆盖:
 //       MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
 //       MMEMORY_LOG_FILE=<path>   指定则改为追加模式写文件 (否则 stderr)
-//   说明: 只使用 <spdlog/spdlog.h> 中声明的工厂函数 (stderr_logger_mt /
-//         basic_logger_mt), 实现在链接的 spdlog 库内, 可兼容头文件
-//         安装不完整的 spdlog (如系统缺 sinks/ 目录)。
 // ----------------------------------------------------------------------------
 std::shared_ptr<spdlog::logger> get_logger()
 {

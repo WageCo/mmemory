@@ -155,8 +155,10 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
 - 环境变量可覆盖:
   - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
   - `MMEMORY_LOG_FILE=<path>` — 指定时改为追加模式写文件;未指定则输出到 stderr
-- 只依赖 `<spdlog/spdlog.h>` 核心 API(工厂函数 `stderr_logger_mt` / `basic_logger_mt`),
-  不依赖 `sinks/` 子目录头文件,兼容头文件安装不完整的 spdlog
+- 使用 `stderr_logger_mt` / `basic_logger_mt` 工厂函数创建 logger
+  (注意: spdlog 1.17 起 `stderr_logger_mt` 声明在 `sinks/stdout_sinks.h`,
+  `basic_logger_mt` 声明在 `sinks/basic_file_sink.h`;
+  1.17 不再提供 `stderr_sinks.h` / `stderr_color_sinks.h`)
 
 ```bash
 # 查看分配/释放日志并落地到文件
