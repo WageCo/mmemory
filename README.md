@@ -148,10 +148,15 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
 
 ## 日志
 
-使用 spdlog,默认输出到 **stderr**:
+使用 spdlog,默认输出到 **stderr**。级别分层(教学设计):
 
-- 错误(如 `double free`、`sbrk` 失败)用 `error` 级别,始终可见;
-- 分配/释放细节用 `debug` 级别,默认不显示(`DEBUG` 编译时默认显示);
+| 级别 | 内容 |
+|---|---|
+| `error` | 失败路径:malloc/sbrk 失败、double free、calloc 溢出、sbrk 收缩失败 |
+| `debug` | 主流程:malloc 请求/复用/新块、free 入口、realloc 扩容 |
+| `trace` | 细节:块分割(split)、前后邻居合并(coalesce)、堆顶连带回收、挂回空闲链表、calloc/realloc 数据操作 |
+
+- `error` 始终可见;`debug` 默认不显示(`DEBUG` 编译时默认显示);`trace` 需显式开启;
 - 环境变量可覆盖:
   - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
   - `MMEMORY_LOG_FILE=<path>` — 指定时改为追加模式写文件;未指定则输出到 stderr
@@ -159,6 +164,11 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
   (注意: spdlog 1.17 起 `stderr_logger_mt` 声明在 `sinks/stdout_sinks.h`,
   `basic_logger_mt` 声明在 `sinks/basic_file_sink.h`;
   1.17 不再提供 `stderr_sinks.h` / `stderr_color_sinks.h`)
+
+```bash
+# 最全日志 (trace 级别 + 落地文件), 可直接观察到分割/合并/回收全过程
+MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
+```
 
 ```bash
 # 查看分配/释放日志并落地到文件
