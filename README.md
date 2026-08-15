@@ -40,7 +40,10 @@ calloc = malloc + 清零;  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 │   ├── googletest/         # 子模块 (系统无 gtest 时兜底)
 │   ├── benchmark/          # 子模块 (系统无 benchmark 时兜底)
 │   └── spdlog/             # 子模块 (系统无 spdlog 时兜底)
-├── src/mmemory.cpp         # 分配器实现 (sbrk + 双向循环链表)
+├── src/
+│   ├── mmemory.cpp         # 核心 API: malloc/free/calloc/realloc + 全局状态
+│   ├── log.cpp             # 日志系统实现 (spdlog)
+│   └── internal.h          # 内部共享: 块头 / inline 链表操作 / 日志配置
 └── test/
     ├── unittest_malloc.cpp # gtest 单元测试
     └── bench_malloc.cpp    # google benchmark 对比基准
