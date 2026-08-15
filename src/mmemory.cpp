@@ -15,10 +15,10 @@
 //   每次分配都可能有 sbrk 系统调用, 释放时链表查找是 O(n) 的,
 //   并发全靠一把全局互斥锁串行化 —— 详见 README 中的 benchmark 对比。
 //
-// 日志: 使用 spdlog, 默认输出到 stderr。
-//   级别: DEBUG 编译默认 debug, 否则 info; 环境变量可覆盖:
+// 日志: 使用 spdlog (仅 <spdlog/spdlog.h> 核心 API)。
+//   默认 stderr 输出; 级别: DEBUG 编译默认 debug, 否则 info; 环境变量可覆盖:
 //     MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
-//     MMEMORY_LOG_FILE=<path>  追加模式同时写文件
+//     MMEMORY_LOG_FILE=<path>  指定则改为写文件 (追加), 否则 stderr
 // ============================================================================
 
 #include <errno.h>
@@ -28,37 +28,36 @@
 #include <unistd.h>
 
 #include <memory>
-#include <vector>
 
 #include <spdlog/spdlog.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stderr_sinks.h>
 
 namespace wageco
 {
 // ----------------------------------------------------------------------------
-// 日志系统 (教学示例: spdlog 的 sink 组合 + 级别配置)
-//   - 默认输出到 stderr; 级别: DEBUG 编译默认 debug, 否则 info
+// 日志系统 (教学示例: spdlog 核心 API, 不依赖任何 sinks/ 头文件)
+//   - 默认 stderr 输出; 级别: DEBUG 编译默认 debug, 否则 info
 //   - 环境变量可覆盖:
 //       MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
-//       MMEMORY_LOG_FILE=<path>   追加模式同时输出到文件
+//       MMEMORY_LOG_FILE=<path>   指定则改为追加模式写文件 (否则 stderr)
+//   说明: 只使用 <spdlog/spdlog.h> 中声明的工厂函数 (stderr_logger_mt /
+//         basic_logger_mt), 实现在链接的 spdlog 库内, 可兼容头文件
+//         安装不完整的 spdlog (如系统缺 sinks/ 目录)。
 // ----------------------------------------------------------------------------
 std::shared_ptr<spdlog::logger> get_logger()
 {
     static std::shared_ptr<spdlog::logger> logger = []() {
-        // sink 1: stderr 输出
-        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
-        std::vector<spdlog::sink_ptr> sinks{stderr_sink};
-
-        // sink 2 (可选): 追加模式文件输出
+        std::shared_ptr<spdlog::logger> l;
         const char *file_path = std::getenv("MMEMORY_LOG_FILE");
         if (file_path && *file_path)
         {
-            auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(file_path, true);
-            sinks.push_back(file_sink);
+            // 文件输出 (追加模式)
+            l = spdlog::basic_logger_mt("mmemory", file_path, true);
         }
-
-        auto l = std::make_shared<spdlog::logger>("mmemory", sinks.begin(), sinks.end());
+        else
+        {
+            // stderr 输出
+            l = spdlog::stderr_logger_mt("mmemory");
+        }
 #ifdef DEBUG
         l->set_level(spdlog::level::debug); // 调试构建默认输出 debug 级别
 #else

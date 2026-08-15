@@ -154,7 +154,9 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
 - 分配/释放细节用 `debug` 级别,默认不显示(`DEBUG` 编译时默认显示);
 - 环境变量可覆盖:
   - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
-  - `MMEMORY_LOG_FILE=<path>` — 追加模式同时写入文件(演示 spdlog 多 sink 组合)
+  - `MMEMORY_LOG_FILE=<path>` — 指定时改为追加模式写文件;未指定则输出到 stderr
+- 只依赖 `<spdlog/spdlog.h>` 核心 API(工厂函数 `stderr_logger_mt` / `basic_logger_mt`),
+  不依赖 `sinks/` 子目录头文件,兼容头文件安装不完整的 spdlog
 
 ```bash
 # 查看分配/释放日志并落地到文件
