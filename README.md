@@ -78,34 +78,6 @@ wageco::malloc/free/calloc/realloc    ← 转发到全局 g_allocator
 - 换查找策略(FirstFit ↔ BestFit)→ 组合根换一个对象即可;
 - `src/mmemory.cpp` 是唯一装配点(组合根)。
 
-### 目录结构
-
-```
-.
-├── CMakeLists.txt
-├── include/                     # 头文件统一放这里 (内部头非公共接口)
-│   ├── mmemory.h                # 对外接口 (wageco::malloc/free/calloc/realloc)
-│   ├── logging.h                # 日志配置 (SPDLOG_ACTIVE_LEVEL) + get_logger
-│   ├── list.h                   # 链表层: ListNode / IList / HeaderList
-│   ├── block.h                  # 块层: block_t / 块-节点互转 helpers
-│   ├── memory.h                 # 内存提供者层: IMemory / SbrkMemory
-│   ├── find_strategy.h          # 查找策略层: IFindStrategy / FirstFit / BestFit
-│   ├── allocator.h              # 分配器层: Allocator
-│   └── internal.h               # 聚合总头 (src/*.cpp 使用)
-├── libs/
-│   ├── benchmark/               # 子模块 (系统无 benchmark 时兜底)
-│   └── spdlog/                  # 子模块 (系统无 spdlog 时兜底)
-├── src/
-│   ├── mmemory.cpp              # 组合根: 装配依赖 + 4 个公共 API 转发
-│   ├── allocator.cpp            # Allocator: 存储模式×内存申请×查找策略 的组合逻辑
-│   ├── list.cpp                 # HeaderList: 双向循环链表 (存储模式实现)
-│   ├── memory.cpp               # SbrkMemory: sbrk/brk 封装 (内存申请实现)
-│   ├── log.cpp                  # 日志系统实现 (spdlog)
-│   └── override.cpp             # 链接期接管系统 malloc (仅 MMEMORY_OVERRIDE_MALLOC=ON)
-└── test/
-    └── bench_malloc.cpp         # google benchmark 对比基准 (单份代码, 宏切换命名空间)
-```
-
 ## 测试结果
 
 > 仅性能基准(wageco vs 系统 malloc);单元测试由 CI 保证,提交即通过,不在此罗列。
