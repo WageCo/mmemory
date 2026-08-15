@@ -75,9 +75,10 @@ inline void list_init(header_t *node, size_t size)
 //     增加字节总量统计、按地址有序插入等, 都只需在此类上做增量修改。
 //
 // 实现位置: 复杂操作 (insert/remove/find*) 定义在 src/list.cpp (声明/实现分离,
-//   标准 C++ 布局); 简单访问器 (empty/size) 保留内联。注意: 移到 .cpp 后这些
-//   操作失去内联, 热路径有函数调用开销 —— 如需极致性能可开 LTO
-//   (INTERPROCEDURAL_OPTIMIZATION) 或把这些方法改回内联。
+//   标准 C++ 布局); 简单访问器 (empty/size) 保留内联。
+// 性能注记: 非内联引入的函数调用开销 (~ns 级) 相对分配器的主要成本
+//   (全局锁 + sbrk 系统调用, 单次 ~µs 级) 可忽略, benchmark 已佐证;
+//   仅当未来把链表替换为更低开销结构时才需重新考虑内联/LTO。
 class HeaderList
 {
 public:
