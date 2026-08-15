@@ -85,6 +85,22 @@ TEST(testMalloc, ReallocTest)
     EXPECT_EQ(wageco::realloc(q, 0), nullptr);
 }
 
+// 回归: double free 防御
+//   free 同一指针两次: 第二次应被检测 (已在空闲链表/不在已分配链表) 并忽略,
+//   不崩溃、不破坏链表; 同时输出 error 级别日志 (可通过 MMEMORY_LOG_LEVEL 观察)。
+TEST(testMalloc, DoubleFreeTest)
+{
+    void *p = wageco::malloc(128);
+    ASSERT_NE(p, nullptr);
+    wageco::free(p);
+    // 第二次释放应安全 (防御生效), 不产生崩溃/未定义行为
+    EXPECT_NO_FATAL_FAILURE(wageco::free(p));
+    // 释放后分配器仍应正常工作
+    void *q = wageco::malloc(128);
+    ASSERT_NE(q, nullptr);
+    wageco::free(q);
+}
+
 // 回归: 碎片回收验证
 //   分配 20000 块随机大小, 乱序释放全部, 断言 program break 基本回到原值。
 //   修复前 (无合并/精确匹配): 乱序释放的块滞留空闲链表, 堆无法回收, 该断言必挂;

@@ -10,6 +10,13 @@
 //
 // 实现基于 sbrk() + 双向循环链表, 详见 src/mmemory.cpp。
 // 注意: 仅支持 Linux (依赖 <unistd.h> 的 sbrk 与 pthread)。
+//
+// 日志 (spdlog, 环境变量可配置):
+//   MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
+//     - error: 失败路径 (malloc 失败 / double free / calloc 溢出等)
+//     - debug: 分配/释放主流程 (DEBUG 编译时默认开启)
+//     - trace: 分割 / 合并 / 回收等细节
+//   MMEMORY_LOG_FILE=<path>  指定时改为追加模式写文件, 否则输出 stderr
 // ============================================================================
 #ifndef __WAGECO_MMEMORY_H_
 #define __WAGECO_MMEMORY_H_
