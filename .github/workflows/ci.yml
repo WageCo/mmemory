@@ -1,0 +1,33 @@
+# GitHub Actions CI: Linux 上构建 + 单元测试 + 快速基准
+# 依赖策略: 通过 apt 安装 libgtest-dev / libbenchmark-dev (find_package 优先路径),
+#           不使用子模块; 子模块仅在本地"无系统库"时作为兜底。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libgtest-dev libbenchmark-dev
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run unit tests
+        run: ./build/CustomMemory
+
+      - name: Run benchmark (short)
+        run: ./build/CustomMemory_bench --benchmark_min_time=0.1s

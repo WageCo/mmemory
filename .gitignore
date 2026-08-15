@@ -1,2 +1,13 @@
+# IDE / editor
 .vscode
-build
+
+# Build output
+build/
+build-*/
+
+# CMake artifacts
+.cache/
+CMakeFiles/
+
+# Logs
+*.log
