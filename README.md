@@ -6,7 +6,7 @@ A simple memory allocator. 自我学习用简易内存分配器。
 
 实属逆向优化 :D —— 自我学习为主,不求性能,只求把原理学明白。
 
-## 原理速览
+## 原理
 
 ```
 内存布局 (每个块, 物理解耦/边界 tag 思路, 同 dlmalloc):
@@ -35,35 +35,9 @@ A simple memory allocator. 自我学习用简易内存分配器。
 calloc = malloc + 清零 (含溢出检查);  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 ```
 
-## 目录结构
+## 设计
 
-```
-.
-├── CMakeLists.txt
-├── include/                     # 头文件统一放这里 (内部头非公共接口)
-│   ├── mmemory.h                # 对外接口 (wageco::malloc/free/calloc/realloc)
-│   ├── logging.h                # 日志配置 (SPDLOG_ACTIVE_LEVEL) + get_logger
-│   ├── list.h                   # 链表层: ListNode / IList / HeaderList
-│   ├── block.h                  # 块层: block_t / 块-节点互转 helpers
-│   ├── memory.h                 # 内存提供者层: IMemory / SbrkMemory
-│   ├── find_strategy.h          # 查找策略层: IFindStrategy / FirstFit / BestFit
-│   ├── allocator.h              # 分配器层: Allocator
-│   └── internal.h               # 聚合总头 (src/*.cpp 使用)
-├── libs/
-│   ├── benchmark/               # 子模块 (系统无 benchmark 时兜底)
-│   └── spdlog/                  # 子模块 (系统无 spdlog 时兜底)
-├── src/
-│   ├── mmemory.cpp              # 组合根: 装配依赖 + 4 个公共 API 转发
-│   ├── allocator.cpp            # Allocator: 存储模式×内存申请×查找策略 的组合逻辑
-│   ├── list.cpp                 # HeaderList: 双向循环链表 (存储模式实现)
-│   ├── memory.cpp               # SbrkMemory: sbrk/brk 封装 (内存申请实现)
-│   ├── log.cpp                  # 日志系统实现 (spdlog)
-│   └── override.cpp             # 链接期接管系统 malloc (仅 MMEMORY_OVERRIDE_MALLOC=ON)
-└── test/
-    └── bench_malloc.cpp         # google benchmark 对比基准 (单份代码, 宏切换命名空间)
-```
-
-## 架构与依赖注入
+### 架构与依赖注入
 
 分配器 = **存储模式 + 内存申请 + 查找策略** 三个可注入依赖的组合(策略模式):
 
@@ -104,6 +78,34 @@ wageco::malloc/free/calloc/realloc    ← 转发到全局 g_allocator
 - 换查找策略(FirstFit ↔ BestFit)→ 组合根换一个对象即可;
 - `src/mmemory.cpp` 是唯一装配点(组合根)。
 
+### 目录结构
+
+```
+.
+├── CMakeLists.txt
+├── include/                     # 头文件统一放这里 (内部头非公共接口)
+│   ├── mmemory.h                # 对外接口 (wageco::malloc/free/calloc/realloc)
+│   ├── logging.h                # 日志配置 (SPDLOG_ACTIVE_LEVEL) + get_logger
+│   ├── list.h                   # 链表层: ListNode / IList / HeaderList
+│   ├── block.h                  # 块层: block_t / 块-节点互转 helpers
+│   ├── memory.h                 # 内存提供者层: IMemory / SbrkMemory
+│   ├── find_strategy.h          # 查找策略层: IFindStrategy / FirstFit / BestFit
+│   ├── allocator.h              # 分配器层: Allocator
+│   └── internal.h               # 聚合总头 (src/*.cpp 使用)
+├── libs/
+│   ├── benchmark/               # 子模块 (系统无 benchmark 时兜底)
+│   └── spdlog/                  # 子模块 (系统无 spdlog 时兜底)
+├── src/
+│   ├── mmemory.cpp              # 组合根: 装配依赖 + 4 个公共 API 转发
+│   ├── allocator.cpp            # Allocator: 存储模式×内存申请×查找策略 的组合逻辑
+│   ├── list.cpp                 # HeaderList: 双向循环链表 (存储模式实现)
+│   ├── memory.cpp               # SbrkMemory: sbrk/brk 封装 (内存申请实现)
+│   ├── log.cpp                  # 日志系统实现 (spdlog)
+│   └── override.cpp             # 链接期接管系统 malloc (仅 MMEMORY_OVERRIDE_MALLOC=ON)
+└── test/
+    └── bench_malloc.cpp         # google benchmark 对比基准 (单份代码, 宏切换命名空间)
+```
+
 ## 构建与基准测试
 
 依赖:Linux + CMake ≥ 3.20 + C++14 编译器。
@@ -132,7 +134,9 @@ cmake --build build -j$(nproc)
 
 > 提示:Windows + WSL2 场景,建议在 WSL 内构建(把仓库 clone 到 WSL 自己的文件系统,避免 `/mnt/c` 的 9P 桥接性能损耗)。
 
-## Benchmark 结果(wageco vs 系统 malloc)
+## 测试结果
+
+> 仅性能基准(wageco vs 系统 malloc);单元测试由 CI 保证,提交即通过,不在此罗列。
 
 > **环境与复现**:以下数据来自本项目开发机实测,`数值随 CPU / 编译器 / 系统库版本变化`,仅供量级参考。
 > 复现:
@@ -208,32 +212,13 @@ BM_Churn                          9.73 ns         9.73 ns     11466786
 
 ## 日志
 
-使用 spdlog,默认输出到 **stderr**。级别分层(学习设计):
+基于 spdlog,默认输出到 stderr。级别自低到高:`trace`(分割/合并细节)→ `debug`(主流程)→ `info`(DEBUG 构建:退出时泄漏检测/统计)→ `error`(失败路径)。
 
-| 级别 | 内容 |
-|---|---|
-| `error` | 失败路径:malloc 过大/失败、double free、calloc 溢出、释放失败 |
-| `debug` | 主流程:malloc 请求/复用/新块、free 入口、realloc 扩容 |
-| `trace` | 细节:块分割(split)、前后邻居合并(coalesce)、挂回空闲链表、calloc/realloc 数据操作 |
-| `info` | DEBUG 构建:退出时泄漏检测 / 分配统计 / 提供者字节统计 |
-
-- `error` 始终可见;`debug` 默认不显示(`DEBUG` 编译时默认显示);`trace` 需显式开启;
-- **编译期剥离**:日志用 `SPDLOG_LOGGER_*` 宏 + `SPDLOG_ACTIVE_LEVEL` 控制——
-  Release 构建下 `debug`/`trace` 在编译期完全消除(参数不求值、零开销),
-  保证 benchmark 测量的是纯分配器逻辑;查看 `debug`/`trace` 日志需 `-DDEBUG` 构建
-  (如 `cmake -DCMAKE_CXX_FLAGS=-DDEBUG`);`error` 日志两种构建都有;
-- **进程生命周期 logger**:`get_logger()` 返回空删除器别名,logger 永不析构,
-  因此程序退出时(全局对象析构阶段)的泄漏检测/统计打印依然安全;
-- 环境变量可覆盖:
-  - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
-  - `MMEMORY_LOG_FILE=<path>` — 指定时改为追加模式写文件;未指定则输出到 stderr
-- 使用 `stderr_logger_mt` / `basic_logger_mt` 工厂函数创建 logger
-  (注意: spdlog 1.17 起 `stderr_logger_mt` 声明在 `sinks/stdout_sinks.h`,
-  `basic_logger_mt` 声明在 `sinks/basic_file_sink.h`;
-  1.17 不再提供 `stderr_sinks.h` / `stderr_color_sinks.h`)
+- **编译期剥离**:`debug`/`trace` 在 Release 构建下编译期消除,零开销,保证 benchmark 测的是纯分配器逻辑;查看需 `-DDEBUG` 构建(如 `cmake -DCMAKE_CXX_FLAGS=-DDEBUG`);`error` 两种构建始终可见;
+- **环境变量**:`MMEMORY_LOG_LEVEL`(`trace|debug|info|warn|error|critical|off`)、`MMEMORY_LOG_FILE=<path>`(落地文件,默认 stderr)。
 
 ```bash
-# 最全日志 (trace 级别 + 落地文件), 可直接观察到分割/合并/回收全过程
+# trace 级别 + 落地文件, 可观察分割/合并/回收全过程
 MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory_bench
 ```
 
