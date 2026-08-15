@@ -1,10 +1,10 @@
 # MMEMORY
 
-A simple memory allocator. 教学演示用简易内存分配器。
+A simple memory allocator. 自我学习用简易内存分配器。
 
-把真实 malloc 的核心机制(系统调用申请内存、块元数据、空闲块复用、碎片合并)用最少代码演示清楚,并带**依赖注入架构**:分配器 = **存储模式 + 内存申请 + 查找策略** 三个可注入依赖的组合,每个维度都可替换。
+个人逆向学习之作:通过亲手实现一个简易分配器,把真实 malloc 的核心机制(系统调用申请内存、块元数据、空闲块复用、碎片合并)用最少代码吃透,并实践**依赖注入架构**:分配器 = **存储模式 + 内存申请 + 查找策略** 三个可注入依赖的组合,每个维度都可替换。
 
-实属逆向优化 :D —— 教学为主,不做任何性能优化。
+实属逆向优化 :D —— 自我学习为主,不求性能,只求把原理学明白。
 
 ## 原理速览
 
@@ -252,11 +252,11 @@ BM_Churn                          9.73 ns         9.73 ns     11466786
 - **批量场景差距缩小到 ~2-9×**:批量释放触发合并与反向释放,`sbrk` 次数摊薄;大块(4096B)最接近——此时系统 malloc 也走 mmap/大块路径,双方成本结构相似;
 - **AllocHold 稳态占用 wageco 只要 ~34 ns**:保持 1024 块存活、每轮替换一个,空闲链表稳定命中(first-fit 快速路径),不再每次 `sbrk`——说明"复用为主"的稳态场景差距大幅缩小。
 
-> 这正是教学意义所在:这些数字直观展示了真实分配器为什么要做 **tcache / per-thread arena / 无锁设计**,也展示了"空闲复用为主"时分配器可以接近系统水平。
+> 这正是学习意义所在:这些数字直观展示了真实分配器为什么要做 **tcache / per-thread arena / 无锁设计**,也展示了"空闲复用为主"时分配器可以接近系统水平。
 
 ## 日志
 
-使用 spdlog,默认输出到 **stderr**。级别分层(教学设计):
+使用 spdlog,默认输出到 **stderr**。级别分层(学习设计):
 
 | 级别 | 内容 |
 |---|---|
@@ -289,7 +289,7 @@ MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
 
 - **sbrk/brk 独占堆**:默认内存提供者 `SbrkMemory` 使用 `sbrk`,操作的是**进程级全局断点**——
   断点被外部移动会导致反向释放错乱。因此本库**不适合与系统 malloc 混用**。两种正确用法:
-  1. **独占假设(默认)**:只用 `wageco::malloc/free` 等命名空间 API,进程内不使用系统 malloc / 其他 sbrk 使用者(教学、自用);
+  1. **独占假设(默认)**:只用 `wageco::malloc/free` 等命名空间 API,进程内不使用系统 malloc / 其他 sbrk 使用者(自用学习);
   2. **链接期接管(强制互斥)**:构建时 `-DMMEMORY_OVERRIDE_MALLOC=ON`,库导出 `__wrap_malloc/free/calloc/realloc`,
      可执行文件链接 `-Wl,--wrap=malloc,...` —— 进程内**所有** `malloc` 调用(含第三方库)统一重定向到本库,
      与系统 malloc 在链接期互斥,不存在混用(tcmalloc/jemalloc 的替换机制);
@@ -297,4 +297,4 @@ MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
 - 单全局锁,多线程无扩展性;
 - 链表 O(n) 查找,无 bin 分级 / 哈希索引;
 - `realloc` 缩容不分割(原地返回,空间不回收);
-- 教学实现,不追求与系统 malloc 的性能可比性。
+- 学习实现,不追求与系统 malloc 的性能可比性。
