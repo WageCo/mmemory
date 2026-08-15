@@ -44,7 +44,8 @@ calloc = malloc + 清零;  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 │   └── spdlog/             # 子模块 (系统无 spdlog 时兜底)
 ├── src/
 │   ├── mmemory.cpp         # 核心 API: malloc/free/calloc/realloc + 全局状态
-│   └── log.cpp             # 日志系统实现 (spdlog)
+│   ├── log.cpp             # 日志系统实现 (spdlog)
+│   └── list.cpp            # HeaderList 链表实现
 └── test/
     ├── unittest_malloc.cpp # gtest 单元测试
     └── bench_malloc.cpp    # google benchmark 对比基准
@@ -78,14 +79,15 @@ cmake --build build -j$(nproc)
 环境:WSL2 Ubuntu, gcc 15.2.0, googletest 1.17.0
 
 ```
-[==========] Running 4 tests from 1 test suite.
-[----------] 4 tests from testMalloc
+[==========] Running 5 tests from 1 test suite.
+[----------] 5 tests from testMalloc
 [ RUN      ] testMalloc.MallocTest                [       OK ] (0 ms)
-[ RUN      ] testMalloc.MyMallocTest              [       OK ] (55 ms)
+[ RUN      ] testMalloc.MyMallocTest              [       OK ] (84 ms)
 [ RUN      ] testMalloc.ReallocTest               [       OK ] (0 ms)
-[ RUN      ] testMalloc.FragmentationShrinkTest   [       OK ] (3170 ms)
-[----------] 4 tests from testMalloc (3226 ms total)
-[  PASSED  ] 4 tests.
+[ RUN      ] testMalloc.DoubleFreeTest            [       OK ] (0 ms)
+[ RUN      ] testMalloc.FragmentationShrinkTest   [       OK ] (3091 ms)
+[----------] 5 tests from testMalloc (3176 ms total)
+[  PASSED  ] 5 tests.
 ```
 
 | 测试 | 验证内容 |
@@ -93,6 +95,7 @@ cmake --build build -j$(nproc)
 | MallocTest | 系统 malloc 压力测试(3.2M 次分配/释放) |
 | MyMallocTest | 自定义分配器同模式压力测试 |
 | ReallocTest | realloc 扩容内容保留 + `realloc(ptr, 0)` 释放语义 |
+| DoubleFreeTest | double free 防御:第二次释放被检测并安全忽略(不崩溃) |
 | FragmentationShrinkTest | 20000 块乱序释放后堆完整回收(碎片合并验证) |
 
 ## Benchmark 结果(自定义分配器 vs 系统 malloc)
@@ -108,43 +111,43 @@ cmake --build build -j$(nproc)
 ```
 Benchmark                                   Time             CPU   Iterations
 -----------------------------------------------------------------------------
-BM_System_MallocFree/8                    4.98 ns         4.98 ns     27240005
-BM_System_MallocFree/64                   5.21 ns         5.21 ns     27761039
-BM_System_MallocFree/512                  5.23 ns         5.23 ns     26692512
-BM_System_MallocFree/4096                 13.5 ns         13.5 ns     11014715
-BM_Custom_MallocFree/8                    5794 ns         5795 ns        25060
-BM_Custom_MallocFree/64                   5733 ns         5733 ns        25653
-BM_Custom_MallocFree/512                  5551 ns         5550 ns        25530
-BM_Custom_MallocFree/4096                 5914 ns         5886 ns        24251
-BM_System_Batch/8                         4269 ns         4269 ns        32343
-BM_System_Batch/64                        4141 ns         4141 ns        36015
-BM_System_Batch/512                       3899 ns         3900 ns        34311
-BM_System_Batch/4096                    198884 ns       198646 ns          732
-BM_Custom_Batch/8                        74144 ns        73857 ns         2005
-BM_Custom_Batch/64                       80583 ns        80251 ns         1831
-BM_Custom_Batch/512                     107032 ns       106723 ns         1000
-BM_Custom_Batch/4096                    359677 ns       359562 ns          375
-BM_System_MallocFree_MT/8/threads:1       5.04 ns         5.04 ns     27579469
-BM_System_MallocFree_MT/8/threads:4       5.09 ns         5.08 ns     23534700
-BM_Custom_MallocFree_MT/8/threads:1       5425 ns         5425 ns        25932
-BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
+BM_System_MallocFree/8                    4.96 ns         4.97 ns     28361922
+BM_System_MallocFree/64                   5.04 ns         5.04 ns     28001604
+BM_System_MallocFree/512                  5.13 ns         5.13 ns     26194524
+BM_System_MallocFree/4096                 13.2 ns         13.2 ns     10943427
+BM_Custom_MallocFree/8                    4231 ns         4231 ns        33541
+BM_Custom_MallocFree/64                   3904 ns         3904 ns        35896
+BM_Custom_MallocFree/512                  4138 ns         4138 ns        32116
+BM_Custom_MallocFree/4096                 4300 ns         4300 ns        31636
+BM_System_Batch/8                         4219 ns         4220 ns        30361
+BM_System_Batch/64                        4048 ns         4048 ns        34862
+BM_System_Batch/512                       4183 ns         4183 ns        35215
+BM_System_Batch/4096                    198378 ns       198136 ns          682
+BM_Custom_Batch/8                        74796 ns        74512 ns         1762
+BM_Custom_Batch/64                       76377 ns        76099 ns         1715
+BM_Custom_Batch/512                     105529 ns       105288 ns         1000
+BM_Custom_Batch/4096                    387640 ns       387580 ns          390
+BM_System_MallocFree_MT/8/threads:1       5.05 ns         5.05 ns     28123729
+BM_System_MallocFree_MT/8/threads:4       5.27 ns         5.27 ns     25003392
+BM_Custom_MallocFree_MT/8/threads:1       5541 ns         5542 ns        25906
+BM_Custom_MallocFree_MT/8/threads:4      10672 ns         3728 ns        46960
 ```
 
 ### 结果解读
 
 | 场景 | 系统 malloc | wageco | 差距 |
 |---|---|---|---|
-| 单次分配+释放 (8B) | 4.98 ns | 5,794 ns | ~**1100×** |
-| 单次分配+释放 (4096B) | 13.5 ns | 5,914 ns | ~438× |
-| 批量 256×8B | 4,269 ns | 74,144 ns | ~17× |
-| 批量 256×4096B | 198,884 ns | 359,677 ns | ~1.8× |
-| 多线程 4 线程 (8B) | 5.08 ns | 7,768 ns(总) | 并发无扩展 |
+| 单次分配+释放 (8B) | 4.96 ns | 4,231 ns | ~**850×** |
+| 单次分配+释放 (4096B) | 13.2 ns | 4,300 ns | ~326× |
+| 批量 256×8B | 4,219 ns | 74,796 ns | ~18× |
+| 批量 256×4096B | 198,378 ns | 387,640 ns | ~2.0× |
+| 多线程 4 线程 (8B) | 5.27 ns | 10,672 ns(总) | 并发无扩展 |
 
 差距来自三处"每次必付"的固定成本:
 
 1. **每次分配都可能 `sbrk` 系统调用**(µs 级);系统 malloc 命中 tcache 后零系统调用;
 2. **释放时 O(n) 链表遍历**(合法性校验 + 前后邻居查找 ×2),块越多越慢;
-3. **全局互斥锁**:4 线程下总耗时反而上升(5425→7768 ns),并发被串行化——系统 malloc 用 per-thread arena/tcache 规避了这点。
+3. **全局互斥锁**:4 线程下总耗时反而上升(5541→10672 ns),并发被串行化——系统 malloc 用 per-thread arena/tcache 规避了这点。
 
 批量场景差距缩小(合并与堆顶回收摊薄了 sbrk 次数),大块(4096B)最接近——此时系统 malloc 也走 mmap/大块路径,双方成本结构相似。
 
