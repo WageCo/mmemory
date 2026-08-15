@@ -1,3 +1,16 @@
+// ============================================================================
+// mmemory.h - 教学用简易内存分配器对外接口
+// ----------------------------------------------------------------------------
+// 提供与标准 C 库同名的四个函数, 位于 namespace wageco:
+//
+//   wageco::malloc(size)    分配 size 字节, 返回 16 字节对齐的指针; 失败返回 NULL
+//   wageco::free(addr)      释放 malloc/calloc/realloc 返回的指针; NULL 是合法参数
+//   wageco::calloc(n, size) 分配 n*size 字节并清零; 溢出时返回 NULL
+//   wageco::realloc(addr, n) 调整大小; 语义与标准 realloc 一致
+//
+// 实现基于 sbrk() + 双向循环链表, 详见 src/mmemory.cpp。
+// 注意: 仅支持 Linux (依赖 <unistd.h> 的 sbrk 与 pthread)。
+// ============================================================================
 #ifndef __WAGECO_MMEMORY_H_
 #define __WAGECO_MMEMORY_H_
 #include <unistd.h>
