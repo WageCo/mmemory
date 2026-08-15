@@ -157,6 +157,10 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
 | `trace` | 细节:块分割(split)、前后邻居合并(coalesce)、堆顶连带回收、挂回空闲链表、calloc/realloc 数据操作 |
 
 - `error` 始终可见;`debug` 默认不显示(`DEBUG` 编译时默认显示);`trace` 需显式开启;
+- **编译期剥离**:日志用 `SPDLOG_LOGGER_*` 宏 + `SPDLOG_ACTIVE_LEVEL` 控制——
+  Release 构建下 `debug`/`trace` 在编译期完全消除(参数不求值、零开销),
+  保证 benchmark 测量的是纯分配器逻辑;查看 `debug`/`trace` 日志需 `-DDEBUG` 构建
+  (如 `cmake -DCMAKE_CXX_FLAGS=-DDEBUG`);`error` 日志两种构建都有;
 - 环境变量可覆盖:
   - `MMEMORY_LOG_LEVEL` — `trace|debug|info|warn|error|critical|off`
   - `MMEMORY_LOG_FILE=<path>` — 指定时改为追加模式写文件;未指定则输出到 stderr

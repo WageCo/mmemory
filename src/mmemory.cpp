@@ -29,6 +29,14 @@
 
 #include <memory>
 
+// 编译期日志级别: DEBUG 构建保留 debug/trace; Release 构建剥离 debug/trace
+// (SPDLOG_ACTIVE_LEVEL 使 SPDLOG_LOGGER_DEBUG/TRACE 宏在编译期展开为空,
+//  参数不求值、零开销 —— 保证 benchmark 测的是纯分配器逻辑, 不被日志污染)
+#ifdef DEBUG
+#define SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_DEBUG
+#else
+#define SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_INFO
+#endif
 #include <spdlog/spdlog.h>
 // 注意: spdlog 1.17.0 中 stderr_logger_mt 声明在 stdout_sinks.h,
 //       basic_logger_mt 声明在 basic_file_sink.h (不存在 stderr_sinks.h)
@@ -262,7 +270,7 @@ void *malloc(size_t size)
     // 例如: size=1   -> total = (16+1+15)&~15 = 32
     //        size=500 -> total = (16+500+15)&~15 = 528
     size_t total_size = (sizeof(header_t) + size + align_to - 1) & ~(align_to - 1);
-    get_logger()->debug("malloc: request {} bytes (total {} with header)", size, total_size);
+    SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: request {} bytes (total {} with header)", size, total_size);
     // search list_free: 优先复用已释放的块
     if (stack_memory_list.free_header)
     {
@@ -280,14 +288,14 @@ void *malloc(size_t size)
                 list_insert(stack_memory_list.free_header, rest);
                 ++stack_memory_list.free_size;
                 node->head.size = need_size; // 取用部分缩小为正好需要的大小
-                get_logger()->trace("malloc: split free block, remainder {} bytes -> free list", rest->head.size);
+                SPDLOG_LOGGER_TRACE(get_logger(), "malloc: split free block, remainder {} bytes -> free list", rest->head.size);
             }
             // 从空闲链表摘除 -> 挂到已分配链表
             list_delete(stack_memory_list.free_header, node);
             --stack_memory_list.free_size;
             list_insert(stack_memory_list.malloc_header, node);
             ++stack_memory_list.malloc_size;
-            get_logger()->debug("malloc: reuse free block, start: {:p} (user {} bytes)", (void *)(node + 1), node->head.size);
+            SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: reuse free block, start: {:p} (user {} bytes)", (void *)(node + 1), node->head.size);
             pthread_mutex_unlock(&list_locker);
             return (void *)(node + 1); // 跳过 header, 返回用户区
         }
@@ -298,7 +306,7 @@ void *malloc(size_t size)
     // failed
     if (now_addr == (void *)-1)
     {
-        get_logger()->error("malloc failed, errno: {} ({})", errno, strerror(errno));
+        SPDLOG_LOGGER_ERROR(get_logger(), "malloc failed, errno: {} ({})", errno, strerror(errno));
         pthread_mutex_unlock(&list_locker);
         return nullptr;
     }
@@ -308,7 +316,7 @@ void *malloc(size_t size)
     list_insert(stack_memory_list.malloc_header, node);
     ++stack_memory_list.malloc_size;
     pthread_mutex_unlock(&list_locker);
-    get_logger()->debug("malloc: sbrk new block, total {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
+    SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: sbrk new block, total {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
     // remove header: 用户只看到 header 之后的区域
     return (void *)(node + 1);
 }
@@ -333,11 +341,11 @@ void free(void *addr)
     // 合法性校验: 已在空闲链表 (double free) 或不在已分配链表 (非法指针)
     if (list_find(stack_memory_list.free_header, node) || !list_find(stack_memory_list.malloc_header, node))
     {
-        get_logger()->error("free: double free or no malloc, start: {:p}", (void *)node);
+        SPDLOG_LOGGER_ERROR(get_logger(), "free: double free or no malloc, start: {:p}", (void *)node);
         pthread_mutex_unlock(&list_locker);
         return;
     }
-    get_logger()->debug("free: addr {:p} -> block {:p} (user {} bytes)", addr, (void *)node, node->head.size);
+    SPDLOG_LOGGER_DEBUG(get_logger(), "free: addr {:p} -> block {:p} (user {} bytes)", addr, (void *)node, node->head.size);
     void *program_break_now = sbrk(0); // 记录当前堆顶, 供后续判断是否可收缩
     list_delete(stack_memory_list.malloc_header, node);
     --stack_memory_list.malloc_size;
@@ -350,7 +358,7 @@ void free(void *addr)
         list_delete(stack_memory_list.free_header, succ);
         --stack_memory_list.free_size;
         node->head.size += sizeof(header_t) + succ->head.size;
-        get_logger()->trace("free: coalesce next block {:p}, block now {} bytes", (void *)succ, node->head.size);
+        SPDLOG_LOGGER_TRACE(get_logger(), "free: coalesce next block {:p}, block now {} bytes", (void *)succ, node->head.size);
     }
     // 2) 前驱合并: node 前面紧邻一块空闲块, 则把 node 并入前驱
     header_t *pred = list_find_prev(stack_memory_list.free_header, node);
@@ -360,7 +368,7 @@ void free(void *addr)
         pred->head.size += sizeof(header_t) + node->head.size;
         node = pred; // 合并后的块用前驱表示
         --stack_memory_list.free_size;
-        get_logger()->trace("free: coalesce into prev block {:p}, block now {} bytes", (void *)node, node->head.size);
+        SPDLOG_LOGGER_TRACE(get_logger(), "free: coalesce into prev block {:p}, block now {} bytes", (void *)node, node->head.size);
     }
 
     // --- 堆顶收缩: 能还就还给操作系统 ---
@@ -382,16 +390,16 @@ void free(void *addr)
             list_delete(stack_memory_list.free_header, prev);
             --stack_memory_list.free_size;
             reclaim += sizeof(header_t) + prev->head.size;
-            get_logger()->trace("free: reclaim contiguous prev block {:p} ({} bytes)", (void *)prev, prev->head.size);
+            SPDLOG_LOGGER_TRACE(get_logger(), "free: reclaim contiguous prev block {:p} ({} bytes)", (void *)prev, prev->head.size);
             p = prev;
         }
         // 回收链整体视为一块: 更新最底块的 size (供收缩失败时放回空闲链表)
         p->head.size = reclaim - sizeof(header_t);
-        get_logger()->debug("free: reclaim {} bytes, start: {:p}", reclaim, (void *)sbrk(0));
+        SPDLOG_LOGGER_DEBUG(get_logger(), "free: reclaim {} bytes, start: {:p}", reclaim, (void *)sbrk(0));
         // free memory space: sbrk 传负数表示把断点下移 (归还内存)
         if (sbrk(0 - reclaim) == (void *)-1)
         {
-            get_logger()->error("free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
+            SPDLOG_LOGGER_ERROR(get_logger(), "free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
             // 归还失败: 把整条回收链放回空闲链表, 避免内存丢失
             list_insert(stack_memory_list.free_header, p);
             ++stack_memory_list.free_size;
@@ -404,7 +412,7 @@ void free(void *addr)
         // 不是堆顶块: 挂回空闲链表, 等后续 malloc 复用 / 合并
         list_insert(stack_memory_list.free_header, node);
         ++stack_memory_list.free_size;
-        get_logger()->trace("free: block {:p} (user {} bytes) -> free list", (void *)(node + 1), node->head.size);
+        SPDLOG_LOGGER_TRACE(get_logger(), "free: block {:p} (user {} bytes) -> free list", (void *)(node + 1), node->head.size);
     }
 
     if (stack_memory_list.malloc_size == 0 && stack_memory_list.free_size > 0)
@@ -427,7 +435,7 @@ void *calloc(size_t num, size_t size)
     // 溢出检查: num * size 可能超过 size_t 上限
     if (num > (size_t)-1 / size)
     {
-        get_logger()->error("calloc: size overflow ({} x {})", num, size);
+        SPDLOG_LOGGER_ERROR(get_logger(), "calloc: size overflow ({} x {})", num, size);
         return nullptr;
     }
     size_t total_size = num * size;
@@ -437,7 +445,7 @@ void *calloc(size_t num, size_t size)
         return nullptr;
     }
     memset(addr, 0, total_size); // 置零
-    get_logger()->trace("calloc: {} x {} = {} bytes, zeroed", num, size, total_size);
+    SPDLOG_LOGGER_TRACE(get_logger(), "calloc: {} x {} = {} bytes, zeroed", num, size, total_size);
     return addr;
 }
 
@@ -454,30 +462,30 @@ void *realloc(void *addr, size_t size)
     if (!size)
     {
         // 标准语义: 释放并返回 NULL (历史版本漏了 free, 会泄漏)
-        get_logger()->debug("realloc: size 0, freeing {:p}", addr);
+        SPDLOG_LOGGER_DEBUG(get_logger(), "realloc: size 0, freeing {:p}", addr);
         free(addr);
         return nullptr;
     }
     if (!addr)
     {
-        get_logger()->debug("realloc: NULL addr, malloc {} bytes", size);
+        SPDLOG_LOGGER_DEBUG(get_logger(), "realloc: NULL addr, malloc {} bytes", size);
         return malloc(size);
     }
     header_t *node = (header_t *)addr - 1;
     if (node->head.size >= size)
     {
-        get_logger()->trace("realloc: in-place, old {} >= new {}", node->head.size, size);
+        SPDLOG_LOGGER_TRACE(get_logger(), "realloc: in-place, old {} >= new {}", node->head.size, size);
         return addr; // 原地满足, 直接返回 (不分割, 教学取舍)
     }
     // 需要扩容: 重新分配, 拷贝旧数据, 释放旧块
-    get_logger()->debug("realloc: growing {:p} from {} to {} bytes", addr, node->head.size, size);
+    SPDLOG_LOGGER_DEBUG(get_logger(), "realloc: growing {:p} from {} to {} bytes", addr, node->head.size, size);
     void *new_addr = malloc(size);
     if (new_addr)
     {
         // 只拷贝旧块实际可用的大小, 避免越界读
         memcpy(new_addr, addr, node->head.size);
         free(addr);
-        get_logger()->trace("realloc: moved to {:p} (copied {} bytes)", new_addr, node->head.size);
+        SPDLOG_LOGGER_TRACE(get_logger(), "realloc: moved to {:p} (copied {} bytes)", new_addr, node->head.size);
     }
     return new_addr;
 }
