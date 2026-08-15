@@ -114,7 +114,7 @@ googletest / google-benchmark / spdlog **优先使用系统安装版**(`find_pac
 
 ```bash
 # 克隆 (含子模块)
-git clone --recurse-submodules https://github.com/your-name/mmemory.git
+git clone --recurse-submodules https://github.com/WageCo/mmemory.git
 cd mmemory
 
 # 构建
