@@ -106,34 +106,6 @@ wageco::malloc/free/calloc/realloc    ← 转发到全局 g_allocator
     └── bench_malloc.cpp         # google benchmark 对比基准 (单份代码, 宏切换命名空间)
 ```
 
-## 构建与基准测试
-
-依赖:Linux + CMake ≥ 3.20 + C++14 编译器。
-
-google-benchmark / spdlog **优先使用系统安装版**(`find_package`);系统没有时,CMake 直接引入仓库内子模块(`add_subdirectory`)。**CMake 不负责拉取子模块**:子模块未初始化时会给出提示,请手动执行 `git submodule update --init --recursive`(或 clone 时加 `--recurse-submodules`)。benchmark 缺失时跳过基准目标,不阻塞其余构建。
-
-```bash
-# 克隆 (含子模块)
-git clone --recurse-submodules https://github.com/WageCo/mmemory.git
-cd mmemory
-
-# 构建
-cmake -S . -B build
-cmake --build build -j$(nproc)
-```
-
-产出**两个基准可执行文件**(单份代码,宏 `MMEMORY_TEST_CUSTOM` 切换命名空间):
-
-```bash
-# 性能基准 (两者输出并排对比)
-./build/CustomMemory_bench --benchmark_min_time=0.1s
-./build/CustomMemory_bench_system --benchmark_min_time=0.1s
-```
-
-> 本库独占堆、与系统 malloc 互斥,因此"系统对照"与"本库基准"拆成独立可执行文件(进程级隔离),避免相互干扰。可选链接期接管:`cmake -S . -B build -DMMEMORY_OVERRIDE_MALLOC=ON`(见"已知限制")。
-
-> 提示:Windows + WSL2 场景,建议在 WSL 内构建(把仓库 clone 到 WSL 自己的文件系统,避免 `/mnt/c` 的 9P 桥接性能损耗)。
-
 ## 测试结果
 
 > 仅性能基准(wageco vs 系统 malloc);单元测试由 CI 保证,提交即通过,不在此罗列。
