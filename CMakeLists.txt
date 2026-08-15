@@ -69,7 +69,7 @@ else()
   set(SPDLOG_LIBS spdlog::spdlog)
 endif()
 
-add_library(mmemory STATIC src/mmemory.cpp src/log.cpp)
+add_library(mmemory STATIC src/mmemory.cpp src/log.cpp src/list.cpp)
 target_link_libraries(mmemory PUBLIC ${SPDLOG_LIBS})
 
 add_executable(${PROJECT_NAME} test/unittest_malloc.cpp)
