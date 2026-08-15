@@ -51,7 +51,6 @@ endif()
 include_directories(include)
 
 # spdlog: 优先系统安装版; 否则引入子模块 libs/spdlog
-# (CMake 不负责拉取子模块, 未初始化时给出提示, 请手动 git submodule update --init)
 find_package(spdlog QUIET)
 if(spdlog_FOUND)
   message(STATUS "spdlog: using system-installed spdlog (${spdlog_VERSION})")
@@ -69,11 +68,41 @@ else()
   set(SPDLOG_LIBS spdlog::spdlog)
 endif()
 
-add_library(mmemory STATIC src/mmemory.cpp src/log.cpp src/list.cpp)
+# ----------------------------------------------------------------------------
+# 链接期接管系统 malloc (独占堆模式)
+#   ON  : 编入 src/override.cpp, 可执行目标加 -Wl,--wrap=malloc/free/calloc/realloc
+#   OFF : 仅提供命名空间 API (wageco::), 依赖"独占堆"假设, 勿与系统 malloc 混用
+# ----------------------------------------------------------------------------
+option(MMEMORY_OVERRIDE_MALLOC "Link-time interpose system malloc via --wrap (exclusive heap)" OFF)
+if(MMEMORY_OVERRIDE_MALLOC)
+  message(STATUS "mmemory: overriding system malloc via --wrap (exclusive heap)")
+  set(MMEMORY_OVERRIDE_SRC src/override.cpp)
+else()
+  message(STATUS "mmemory: namespaced API - exclusive-heap assumption, do NOT mix with system malloc")
+endif()
+
+add_library(mmemory STATIC src/mmemory.cpp src/allocator.cpp src/list.cpp src/log.cpp src/memory.cpp ${MMEMORY_OVERRIDE_SRC})
 target_link_libraries(mmemory PUBLIC ${SPDLOG_LIBS})
 
+# 编译成功后把对外公共头复制到构建目录 (build/include/mmemory.h),
+# 方便外部项目引用; 内部头 (allocator.h 等) 属于实现细节, 不外发
+add_custom_command(
+  TARGET mmemory POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/include/mmemory.h
+          ${CMAKE_BINARY_DIR}/include/mmemory.h
+  COMMENT "Copying public header -> ${CMAKE_BINARY_DIR}/include/mmemory.h"
+  VERBATIM)
+
+# 单元测试: 同一源文件, 宏 MMEMORY_TEST_CUSTOM 切换命名空间 (进程级隔离)
+#   CustomMemory:        定义宏 + 链接 mmemory (测 wageco 分配器)
+#   CustomMemory_system: 不定义宏, 不链接 mmemory (测系统 malloc, 对照)
 add_executable(${PROJECT_NAME} test/unittest_malloc.cpp)
+target_compile_definitions(${PROJECT_NAME} PRIVATE MMEMORY_TEST_CUSTOM)
 target_link_libraries(${PROJECT_NAME} mmemory ${GTEST_LIBS})
+
+add_executable(${PROJECT_NAME}_system test/unittest_malloc.cpp)
+target_link_libraries(${PROJECT_NAME}_system ${GTEST_LIBS})
 
 # ----------------------------------------------------------------------------
 # benchmark: 优先系统安装版; 否则引入子模块 libs/benchmark
@@ -102,6 +131,60 @@ else()
 endif()
 
 if(BENCHMARK_ENABLED)
+  # 性能基准: 同一源文件, 宏 MMEMORY_TEST_CUSTOM 切换命名空间 (进程级隔离)
+  #   CustomMemory_bench:        定义宏 + 链接 mmemory (测 wageco)
+  #   CustomMemory_bench_system: 不定义宏, 不链接 mmemory (测系统 malloc)
   add_executable(${PROJECT_NAME}_bench test/bench_malloc.cpp)
+  target_compile_definitions(${PROJECT_NAME}_bench PRIVATE MMEMORY_TEST_CUSTOM)
   target_link_libraries(${PROJECT_NAME}_bench mmemory benchmark::benchmark)
+
+  add_executable(${PROJECT_NAME}_bench_system test/bench_malloc.cpp)
+  target_link_libraries(${PROJECT_NAME}_bench_system benchmark::benchmark)
+endif()
+
+# 独占堆模式: 给可执行目标加 --wrap 链接选项 (链接期接管系统 malloc)
+if(MMEMORY_OVERRIDE_MALLOC)
+  target_link_options(${PROJECT_NAME} PRIVATE -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--wrap=calloc -Wl,--wrap=realloc)
+  if(BENCHMARK_ENABLED)
+    target_link_options(${PROJECT_NAME}_bench PRIVATE -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--wrap=calloc -Wl,--wrap=realloc)
+  endif()
+endif()
+
+# ----------------------------------------------------------------------------
+# 代码格式化: 检测到 clang-format 时提供 format / check-format 目标
+#   用法: cmake --build build --target format        # 直接格式化源码
+#         cmake --build build --target check-format  # 只检查, 不改文件 (CI)
+# ----------------------------------------------------------------------------
+find_program(CLANG_FORMAT clang-format)
+if(CLANG_FORMAT)
+  message(STATUS "clang-format: ${CLANG_FORMAT} (format/check-format targets enabled)")
+  set(MMEMORY_FORMAT_FILES
+    include/mmemory.h
+    include/allocator.h
+    include/block.h
+    include/find_strategy.h
+    include/internal.h
+    include/list.h
+    include/logging.h
+    include/memory.h
+    src/mmemory.cpp
+    src/allocator.cpp
+    src/list.cpp
+    src/log.cpp
+    src/memory.cpp
+    src/override.cpp
+    test/unittest_malloc.cpp
+    test/bench_malloc.cpp)
+  add_custom_target(format
+    COMMAND ${CLANG_FORMAT} -i --style=file ${MMEMORY_FORMAT_FILES}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Formatting sources with clang-format (see .clang-format)"
+    VERBATIM)
+  add_custom_target(check-format
+    COMMAND ${CLANG_FORMAT} --dry-run --Werror --style=file ${MMEMORY_FORMAT_FILES}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Checking formatting with clang-format"
+    VERBATIM)
+else()
+  message(STATUS "clang-format not found; format/check-format targets disabled")
 endif()
