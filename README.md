@@ -50,7 +50,6 @@ calloc = malloc + 清零 (含溢出检查);  realloc = 扩容时新分配 + 拷�
 │   ├── allocator.h              # 分配器层: Allocator
 │   └── internal.h               # 聚合总头 (src/*.cpp 使用)
 ├── libs/
-│   ├── googletest/              # 子模块 (系统无 gtest 时兜底)
 │   ├── benchmark/               # 子模块 (系统无 benchmark 时兜底)
 │   └── spdlog/                  # 子模块 (系统无 spdlog 时兜底)
 ├── src/
@@ -61,8 +60,7 @@ calloc = malloc + 清零 (含溢出检查);  realloc = 扩容时新分配 + 拷�
 │   ├── log.cpp                  # 日志系统实现 (spdlog)
 │   └── override.cpp             # 链接期接管系统 malloc (仅 MMEMORY_OVERRIDE_MALLOC=ON)
 └── test/
-    ├── unittest_malloc.cpp      # gtest 单元测试 (单份代码, 宏切换命名空间)
-    └── bench_malloc.cpp         # google benchmark 对比基准 (同上)
+    └── bench_malloc.cpp         # google benchmark 对比基准 (单份代码, 宏切换命名空间)
 ```
 
 ## 架构与依赖注入
@@ -106,11 +104,11 @@ wageco::malloc/free/calloc/realloc    ← 转发到全局 g_allocator
 - 换查找策略(FirstFit ↔ BestFit)→ 组合根换一个对象即可;
 - `src/mmemory.cpp` 是唯一装配点(组合根)。
 
-## 构建与测试
+## 构建与基准测试
 
 依赖:Linux + CMake ≥ 3.20 + C++14 编译器。
 
-googletest / google-benchmark / spdlog **优先使用系统安装版**(`find_package`);系统没有时,CMake 直接引入仓库内子模块(`add_subdirectory`)。**CMake 不负责拉取子模块**:子模块未初始化时会给出提示,请手动执行 `git submodule update --init --recursive`(或 clone 时加 `--recurse-submodules`)。googletest / spdlog 缺失时构建报错并提示;benchmark 缺失时跳过基准目标,不阻塞测试构建。
+google-benchmark / spdlog **优先使用系统安装版**(`find_package`);系统没有时,CMake 直接引入仓库内子模块(`add_subdirectory`)。**CMake 不负责拉取子模块**:子模块未初始化时会给出提示,请手动执行 `git submodule update --init --recursive`(或 clone 时加 `--recurse-submodules`)。benchmark 缺失时跳过基准目标,不阻塞其余构建。
 
 ```bash
 # 克隆 (含子模块)
@@ -122,63 +120,17 @@ cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-产出**四个可执行文件**(测试/基准为单份代码,宏 `MMEMORY_TEST_CUSTOM` 切换命名空间):
+产出**两个基准可执行文件**(单份代码,宏 `MMEMORY_TEST_CUSTOM` 切换命名空间):
 
 ```bash
-# 单元测试
-./build/CustomMemory           # 测 wageco 分配器 (宏定义, 10 个用例)
-./build/CustomMemory_system    # 测系统 malloc 对照 (无宏, 6 个用例)
-
 # 性能基准 (两者输出并排对比)
 ./build/CustomMemory_bench --benchmark_min_time=0.1s
 ./build/CustomMemory_bench_system --benchmark_min_time=0.1s
 ```
 
-> 本库独占堆、与系统 malloc 互斥,因此"系统对照"与"本库测试"拆成独立可执行文件(进程级隔离),避免断点互相干扰。可选链接期接管:`cmake -S . -B build -DMMEMORY_OVERRIDE_MALLOC=ON`(见"已知限制")。
+> 本库独占堆、与系统 malloc 互斥,因此"系统对照"与"本库基准"拆成独立可执行文件(进程级隔离),避免相互干扰。可选链接期接管:`cmake -S . -B build -DMMEMORY_OVERRIDE_MALLOC=ON`(见"已知限制")。
 
 > 提示:Windows + WSL2 场景,建议在 WSL 内构建(把仓库 clone 到 WSL 自己的文件系统,避免 `/mnt/c` 的 9P 桥接性能损耗)。
-
-## 测试结果
-
-环境:WSL2 Ubuntu, gcc 15.2.0, googletest 1.17.0
-
-### CustomMemory(wageco 分配器,10 个用例)
-
-```
-[==========] Running 10 tests from 1 test suite.
-[ RUN      ] testMalloc.StressTest               [       OK ] (88 ms)
-[ RUN      ] testMalloc.AlignmentTest            [       OK ] (0 ms)
-[ RUN      ] testMalloc.BoundarySizeTest         [       OK ] (0 ms)
-[ RUN      ] testMalloc.CallocTest               [       OK ] (0 ms)
-[ RUN      ] testMalloc.DataIntegrityTest        [       OK ] (0 ms)
-[ RUN      ] testMalloc.ChurnTest                [       OK ] (6 ms)
-[ RUN      ] testMalloc.ReallocTest              [       OK ] (0 ms)
-[ RUN      ] testMalloc.DoubleFreeTest           [       OK ] (0 ms)
-[ RUN      ] testMalloc.FragmentationShrinkTest  [       OK ] (1339 ms)
-[ RUN      ] testMalloc.BestFitTest              [       OK ] (0 ms)
-[  PASSED  ] 10 tests.
-```
-
-| 测试 | 验证内容 |
-|---|---|
-| StressTest | 3.2M 次同模式分配/释放(宏切换:系统或 wageco) |
-| AlignmentTest | 返回指针 16 字节对齐(8 种大小) |
-| BoundarySizeTest | malloc(0) / 1B / 1MB 大块边界 |
-| CallocTest | calloc 清零 + 乘法溢出返回 NULL |
-| DataIntegrityTest | 64 块相邻写模式互不覆盖 |
-| ChurnTest | 2 万次随机混合分配/释放 + 数据完好校验 |
-| ReallocTest | 扩容内容保留 + `realloc(ptr, 0)` 释放语义 |
-| DoubleFreeTest | double free 防御(仅本库,系统下是 UB) |
-| FragmentationShrinkTest | 20000 块乱序释放后堆完整回收 |
-| BestFitTest | BestFit 查找策略注入与分配正确性 |
-
-### CustomMemory_system(系统 malloc 对照,6 个用例)
-
-共享通用用例(Stress / Alignment / Boundary / Calloc / DataIntegrity / Churn),1 个测试套件,全部通过。库专有回归(double free 等)不参与系统对照。
-
-> **DEBUG 构建额外能力**:`-DDEBUG` 构建(如 `cmake -DCMAKE_CXX_FLAGS=-DDEBUG`)时,程序退出会打印:
-> - `MEMORY LEAK DETECTED: N block(s)...`(未释放块清单)或 `no memory leaks`;
-> - `sbrk provider: allocated ... released ... outstanding ...`(提供者字节统计)。
 
 ## Benchmark 结果(wageco vs 系统 malloc)
 
@@ -282,7 +234,7 @@ BM_Churn                          9.73 ns         9.73 ns     11466786
 
 ```bash
 # 最全日志 (trace 级别 + 落地文件), 可直接观察到分割/合并/回收全过程
-MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory
+MMEMORY_LOG_LEVEL=trace MMEMORY_LOG_FILE=/tmp/mmemory.log ./build/CustomMemory_bench
 ```
 
 ## 已知限制
