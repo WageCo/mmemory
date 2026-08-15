@@ -53,6 +53,9 @@ namespace wageco
 class Allocator
 {
 public:
+    // 两条链表都需要"取块大小"回调 (block_size_of), 因此显式初始化
+    Allocator() : malloc_list_(block_size_of), free_list_(block_size_of) {}
+
     // 分配 size 字节, 返回 16 字节对齐的用户指针; 失败返回 nullptr
     void *malloc(size_t size);
     // 释放 malloc/calloc/realloc 返回的指针; nullptr 是合法参数
