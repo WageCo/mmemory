@@ -50,7 +50,27 @@ endif()
 # ----------------------------------------------------------------------------
 include_directories(include)
 
+# spdlog: 优先系统安装版; 否则引入子模块 libs/spdlog
+# (CMake 不负责拉取子模块, 未初始化时给出提示, 请手动 git submodule update --init)
+find_package(spdlog QUIET)
+if(spdlog_FOUND)
+  message(STATUS "spdlog: using system-installed spdlog (${spdlog_VERSION})")
+  set(SPDLOG_LIBS spdlog::spdlog)
+else()
+  message(STATUS "spdlog: system spdlog not found, adding submodule libs/spdlog")
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libs/spdlog/CMakeLists.txt")
+    message(FATAL_ERROR
+      "spdlog not found in system and submodule not initialized at libs/spdlog.\n"
+      "Please fetch it yourself:\n"
+      "  git submodule update --init --recursive\n"
+      "(or clone with --recurse-submodules, or install libspdlog-dev)")
+  endif()
+  add_subdirectory(libs/spdlog)
+  set(SPDLOG_LIBS spdlog::spdlog)
+endif()
+
 add_library(mmemory STATIC src/mmemory.cpp)
+target_link_libraries(mmemory PUBLIC ${SPDLOG_LIBS})
 
 add_executable(${PROJECT_NAME} test/unittest_malloc.cpp)
 target_link_libraries(${PROJECT_NAME} mmemory ${GTEST_LIBS})

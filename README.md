@@ -38,7 +38,8 @@ calloc = malloc + 清零;  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 ├── include/mmemory.h       # 对外接口 (wageco::malloc/free/calloc/realloc)
 ├── libs/
 │   ├── googletest/         # 子模块 (系统无 gtest 时兜底)
-│   └── benchmark/          # 子模块 (系统无 benchmark 时兜底)
+│   ├── benchmark/          # 子模块 (系统无 benchmark 时兜底)
+│   └── spdlog/             # 子模块 (系统无 spdlog 时兜底)
 ├── src/mmemory.cpp         # 分配器实现 (sbrk + 双向循环链表)
 └── test/
     ├── unittest_malloc.cpp # gtest 单元测试
@@ -49,7 +50,7 @@ calloc = malloc + 清零;  realloc = 扩容时新分配 + 拷贝 + 释放旧块
 
 依赖:Linux + CMake ≥ 3.20 + C++14 编译器。
 
-googletest / google-benchmark **优先使用系统安装版**(`find_package`);系统没有时,CMake 直接引入仓库内子模块(`add_subdirectory`)。**CMake 不负责拉取子模块**:子模块未初始化时会给出提示,请手动执行 `git submodule update --init --recursive`(或 clone 时加 `--recurse-submodules`)。googletest 缺失时构建报错并提示;benchmark 缺失时跳过基准目标,不阻塞测试构建。
+googletest / google-benchmark / spdlog **优先使用系统安装版**(`find_package`);系统没有时,CMake 直接引入仓库内子模块(`add_subdirectory`)。**CMake 不负责拉取子模块**:子模块未初始化时会给出提示,请手动执行 `git submodule update --init --recursive`(或 clone 时加 `--recurse-submodules`)。googletest / spdlog 缺失时构建报错并提示;benchmark 缺失时跳过基准目标,不阻塞测试构建。
 
 ```bash
 # 克隆 (含子模块)

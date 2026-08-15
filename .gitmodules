@@ -4,3 +4,6 @@
 [submodule "libs/benchmark"]
 	path = libs/benchmark
 	url = https://github.com/google/benchmark.git
+[submodule "libs/spdlog"]
+	path = libs/spdlog
+	url = https://github.com/gabime/spdlog.git

@@ -4,9 +4,9 @@
 # ----------------------------------------------------------------------------
 # 作用: 在干净环境里走一遍 CI 的完整流程, 提前发现构建/测试/基准问题。
 #
-# 注意: 本脚本【不拉取子模块】, 依赖系统安装的 googletest / google-benchmark
+# 注意: 本脚本【不拉取子模块】, 依赖系统安装的 googletest / google-benchmark / spdlog
 #       (与 CMake 行为一致: CMake 只 add 子模块, 不负责拉取)。
-#       若系统缺库, 请手动: sudo apt install libgtest-dev libbenchmark-dev
+#       若系统缺库, 请手动: sudo apt install libgtest-dev libbenchmark-dev libspdlog-dev
 #       或 git submodule update --init --recursive。
 #
 # 差异: 本地用你机器上的编译器/CMake, 与 GitHub 的 ubuntu-latest 版本可能

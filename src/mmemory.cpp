@@ -18,12 +18,26 @@
 
 #include <errno.h>
 #include <pthread.h>
-#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
+#include <spdlog/spdlog.h>
+
 namespace wageco
 {
+#ifdef DEBUG
+// -DDEBUG 编译时启用 spdlog 的 debug 级别输出
+// (spdlog 默认级别为 info, debug 日志默认不显示)
+namespace
+{
+bool enable_spdlog_debug()
+{
+    spdlog::set_level(spdlog::level::debug);
+    return true;
+}
+const bool spdlog_debug_enabled = enable_spdlog_debug();
+} // namespace
+#endif
 // ----------------------------------------------------------------------------
 // 块头 (header) 与对齐
 // ----------------------------------------------------------------------------
@@ -245,7 +259,7 @@ void *malloc(size_t size)
     // failed
     if (now_addr == (void *)-1)
     {
-        printf("%s errno: %s\n", __func__, strerror(errno));
+        spdlog::error("malloc failed, errno: {} ({})", errno, strerror(errno));
         pthread_mutex_unlock(&list_locker);
         return nullptr;
     }
@@ -256,7 +270,7 @@ void *malloc(size_t size)
     ++stack_memory_list.malloc_size;
     pthread_mutex_unlock(&list_locker);
 #ifdef DEBUG
-    printf("Debug@%s alloc %ld, user %ld, start:%p\n", __func__, total_size, size, sbrk(0));
+    spdlog::debug("malloc: alloc {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
 #endif
     // remove header: 用户只看到 header 之后的区域
     return (void *)(node + 1);
@@ -282,7 +296,7 @@ void free(void *addr)
     // 合法性校验: 已在空闲链表 (double free) 或不在已分配链表 (非法指针)
     if (list_find(stack_memory_list.free_header, node) || !list_find(stack_memory_list.malloc_header, node))
     {
-        printf("%s errno double free or no malloc. start:%p\n", __func__, node);
+        spdlog::error("free: double free or no malloc, start: {:p}", (void *)node);
         pthread_mutex_unlock(&list_locker);
         return;
     }
@@ -333,12 +347,12 @@ void free(void *addr)
         // 回收链整体视为一块: 更新最底块的 size (供收缩失败时放回空闲链表)
         p->head.size = reclaim - sizeof(header_t);
 #ifdef DEBUG
-        printf("Debug@%s %ld, start:%p\n", __func__, reclaim, sbrk(0));
+        spdlog::debug("free: reclaim {} bytes, start: {:p}", reclaim, (void *)sbrk(0));
 #endif
         // free memory space: sbrk 传负数表示把断点下移 (归还内存)
         if (sbrk(0 - reclaim) == (void *)-1)
         {
-            printf("%s errno: %s\n", __func__, strerror(ENOMEM));
+            spdlog::error("free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
             // 归还失败: 把整条回收链放回空闲链表, 避免内存丢失
             list_insert(stack_memory_list.free_header, p);
             ++stack_memory_list.free_size;
