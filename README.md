@@ -148,7 +148,7 @@ BM_Custom_MallocFree_MT/8/threads:4       7768 ns         2974 ns        41700
 
 ## 日志
 
-使用 spdlog,默认输出到**彩色 stderr**:
+使用 spdlog,默认输出到 **stderr**:
 
 - 错误(如 `double free`、`sbrk` 失败)用 `error` 级别,始终可见;
 - 分配/释放细节用 `debug` 级别,默认不显示(`DEBUG` 编译时默认显示);

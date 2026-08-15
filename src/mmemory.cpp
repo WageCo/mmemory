@@ -15,7 +15,7 @@
 //   每次分配都可能有 sbrk 系统调用, 释放时链表查找是 O(n) 的,
 //   并发全靠一把全局互斥锁串行化 —— 详见 README 中的 benchmark 对比。
 //
-// 日志: 使用 spdlog, 默认输出到彩色 stderr。
+// 日志: 使用 spdlog, 默认输出到 stderr。
 //   级别: DEBUG 编译默认 debug, 否则 info; 环境变量可覆盖:
 //     MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
 //     MMEMORY_LOG_FILE=<path>  追加模式同时写文件
@@ -32,13 +32,13 @@
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stderr_color_sinks.h>
+#include <spdlog/sinks/stderr_sinks.h>
 
 namespace wageco
 {
 // ----------------------------------------------------------------------------
 // 日志系统 (教学示例: spdlog 的 sink 组合 + 级别配置)
-//   - 默认输出到彩色 stderr; 级别: DEBUG 编译默认 debug, 否则 info
+//   - 默认输出到 stderr; 级别: DEBUG 编译默认 debug, 否则 info
 //   - 环境变量可覆盖:
 //       MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
 //       MMEMORY_LOG_FILE=<path>   追加模式同时输出到文件
@@ -46,8 +46,8 @@ namespace wageco
 std::shared_ptr<spdlog::logger> get_logger()
 {
     static std::shared_ptr<spdlog::logger> logger = []() {
-        // sink 1: 彩色 stderr 输出
-        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        // sink 1: stderr 输出
+        auto stderr_sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
         std::vector<spdlog::sink_ptr> sinks{stderr_sink};
 
         // sink 2 (可选): 追加模式文件输出
