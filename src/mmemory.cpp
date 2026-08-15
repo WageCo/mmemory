@@ -1,6 +1,12 @@
 // ============================================================================
-// mmemory.cpp - 教学用简易内存分配器实现 (教学演示 / 逆向学习材料)
+// mmemory.cpp - 教学用简易内存分配器: 核心 API 实现
 // ----------------------------------------------------------------------------
+// 模块结构 (src/):
+//   internal.h  - 内部共享: 块头 header_t / 全局状态结构 / inline 链表操作
+//                 / 日志配置 (SPDLOG_ACTIVE_LEVEL) 与 get_logger 声明
+//   log.cpp     - 日志系统实现 (spdlog 封装, 非热路径)
+//   mmemory.cpp - 全局分配器状态 + malloc/free/calloc/realloc
+//
 // 核心思路 (与经典 malloc 实现一脉相承):
 //   1. 用 sbrk() 系统调用从操作系统申请/归还堆空间;
 //   2. 每块内存前都有一个 header (元数据), 记录块大小与链表指针;
@@ -15,7 +21,7 @@
 //   每次分配都可能有 sbrk 系统调用, 释放时链表查找是 O(n) 的,
 //   并发全靠一把全局互斥锁串行化 —— 详见 README 中的 benchmark 对比。
 //
-// 日志: 使用 spdlog (核心 API + 工厂函数, 见下方 get_logger)。
+// 日志: 使用 spdlog (见 internal.h / log.cpp)。
 //   默认 stderr 输出; 级别: DEBUG 编译默认 debug, 否则 info; 环境变量可覆盖:
 //     MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
 //     MMEMORY_LOG_FILE=<path>  指定则改为写文件 (追加), 否则 stderr
@@ -27,228 +33,19 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <memory>
-
-// 编译期日志级别: DEBUG 构建保留 debug/trace; Release 构建剥离 debug/trace
-// (SPDLOG_ACTIVE_LEVEL 使 SPDLOG_LOGGER_DEBUG/TRACE 宏在编译期展开为空,
-//  参数不求值、零开销 —— 保证 benchmark 测的是纯分配器逻辑, 不被日志污染)
-#ifdef DEBUG
-#define SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_DEBUG
-#else
-#define SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_INFO
-#endif
-#include <spdlog/spdlog.h>
-// 注意: spdlog 1.17.0 中 stderr_logger_mt 声明在 stdout_sinks.h,
-//       basic_logger_mt 声明在 basic_file_sink.h (不存在 stderr_sinks.h)
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stdout_sinks.h>
+#include "internal.h"
 
 namespace wageco
 {
 // ----------------------------------------------------------------------------
-// 日志系统 (教学示例: spdlog 核心 API)
-//   - 默认 stderr 输出; 级别: DEBUG 编译默认 debug, 否则 info
-//   - 环境变量可覆盖:
-//       MMEMORY_LOG_LEVEL=trace|debug|info|warn|error|critical|off
-//       MMEMORY_LOG_FILE=<path>   指定则改为追加模式写文件 (否则 stderr)
-// ----------------------------------------------------------------------------
-std::shared_ptr<spdlog::logger> get_logger()
-{
-    static std::shared_ptr<spdlog::logger> logger = []() {
-        std::shared_ptr<spdlog::logger> l;
-        const char *file_path = std::getenv("MMEMORY_LOG_FILE");
-        if (file_path && *file_path)
-        {
-            // 文件输出 (追加模式)
-            l = spdlog::basic_logger_mt("mmemory", file_path, true);
-        }
-        else
-        {
-            // stderr 输出
-            l = spdlog::stderr_logger_mt("mmemory");
-        }
-#ifdef DEBUG
-        l->set_level(spdlog::level::debug); // 调试构建默认输出 debug 级别
-#else
-        l->set_level(spdlog::level::info);  // 发布构建默认 info 及以上
-#endif
-        const char *level_str = std::getenv("MMEMORY_LOG_LEVEL");
-        if (level_str && *level_str)
-        {
-            l->set_level(spdlog::level::from_str(level_str));
-        }
-        l->flush_on(spdlog::level::info); // 教学: info 及以上立即落盘
-        return l;
-    }();
-    return logger;
-}
-// ----------------------------------------------------------------------------
-// 块头 (header) 与对齐
-// ----------------------------------------------------------------------------
-// 对齐粒度: 16 字节 (x86-64 上 long double / SSE 类型所需的最大对齐)
-const unsigned align_to = 16;
-// 用 char[align_to] 保证 union 的尺寸/对齐都是 16 字节
-typedef char ALIGN[align_to];
-
-// 每个内存块的最前面都是这个 header。
-// union 的两种视角:
-//   - head: 元数据 (size + 双向链表指针), 链表操作时使用;
-//   - align: 强制整个 header 为 16 字节, 从而保证用户数据区也 16 字节对齐。
-// 内存布局 (地址从低到高):
-//   [ header_t (16B) | 用户可用数据区 (size 字节) ]
-//   返回给用户的指针 = (header_t*)addr + 1, 即 header 之后的位置。
-typedef union header {
-    struct
-    {
-        size_t size;        // 用户可用区大小 (不含 header 本身), 16 字节对齐
-        union header *pre;  // 双向链表前驱
-        union header *next; // 双向链表后继
-    } head;
-    ALIGN align;
-} header_t;
-
-// ----------------------------------------------------------------------------
 // 分配器全局状态
 // ----------------------------------------------------------------------------
-typedef struct
-{
-    header_t *malloc_header; // "已分配块" 循环链表头 (NULL 表示空表)
-    header_t *free_header;   // "空闲块" 循环链表头
-    size_t malloc_size;      // 已分配块个数
-    size_t free_size;        // 空闲块个数
-} stack_memory_t;
-
 // 全局分配器状态 (静态存储, 零初始化: 两个链表头为 NULL, 计数器为 0)
 static stack_memory_t stack_memory_list;
 
 // 多线程防竞争: 所有链表操作/brk 操作都在这把全局锁内完成。
 // 简单可靠, 但并发场景会串行化 —— 教学取舍。
 static pthread_mutex_t list_locker = PTHREAD_MUTEX_INITIALIZER;
-
-// ----------------------------------------------------------------------------
-// 双向循环链表基础操作
-// ----------------------------------------------------------------------------
-
-// 把 node 初始化为"只有自己一个节点"的循环链表, 并记录大小
-inline void list_init(header_t *node, size_t size)
-{
-    node->head.pre = node;
-    node->head.next = node;
-    node->head.size = size;
-}
-
-// 把 node 插入链表头部 (header 是链表头的引用, 插入后 node 成为新头)。
-// 循环链表不需要尾指针: 头的前驱即尾。
-inline void list_insert(header_t *&header, header_t *node)
-{
-    if (header)
-    {
-        // 非空表: 在头节点之前插入 (即链表尾部), 并更新头
-        header->head.pre->head.next = node; // 尾->next = node
-        node->head.pre = header->head.pre;  // node->pre = 原尾
-        node->head.next = header;           // node->next = 原头
-        header->head.pre = node;            // 原头->pre = node
-    }
-    header = node; // 空表时 node 自成环, 成为头
-}
-
-// 按大小查找: first-fit 策略 —— 返回第一个"用户可用区 >= size"的块。
-// (历史版本是精确匹配 == size, 空闲块几乎无法复用, 造成碎片泄漏;
-//  改为 first-fit 后配合 malloc 里的 split, 空闲块才能被充分复用)
-inline header_t *list_find(header_t *header, size_t size)
-{
-    if (header)
-    {
-        header_t *node = header;
-        // 从头遍历, 跳过所有 size 不足的块; 走到头即停 (循环链表判空)
-        for (; node->head.size < size && node->head.next != header; node = node->head.next)
-            ;
-        if (node->head.size >= size)
-        {
-            return node;
-        }
-    }
-    return nullptr;
-}
-
-// 按指针查找: 判断 node 是否在链表中 (用于 free 的合法性校验)
-inline bool list_find(header_t *header, header_t *node)
-{
-    if (header)
-    {
-        header_t *p = header;
-        for (; p != node && p->head.next != header; p = p->head.next)
-            ;
-        if (p == node)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-// 在链表中查找"物理地址紧邻 node 之前"的块。
-// 物理相邻判断: 块 p 的末尾 (header + 用户区末尾) 正好是 node 的起始地址。
-// 用于释放时的向前合并 (coalescing)。
-inline header_t *list_find_prev(header_t *header, header_t *node)
-{
-    if (header)
-    {
-        header_t *p = header;
-        do
-        {
-            if ((char *)p + sizeof(header_t) + p->head.size == (char *)node)
-            {
-                return p;
-            }
-            p = p->head.next;
-        } while (p != header);
-    }
-    return nullptr;
-}
-
-// 在链表中查找"物理地址紧邻 node 之后"的块。
-// 判断: 某块 q 的起始地址 == node 的末尾地址。
-// 用于释放时的向后合并。
-inline header_t *list_find_next(header_t *header, header_t *node)
-{
-    if (header)
-    {
-        char *node_end = (char *)node + sizeof(header_t) + node->head.size;
-        header_t *q = header;
-        do
-        {
-            if ((char *)q == node_end)
-            {
-                return q;
-            }
-            q = q->head.next;
-        } while (q != header);
-    }
-    return nullptr;
-}
-
-// 从链表摘除 node (header 是链表头的引用, 摘除后可能更新头)。
-// 摘除后 node 重新变成孤立节点 (list_init), 便于后续重新挂到别的链表。
-inline void list_delete(header_t *&header, header_t *node)
-{
-    if (header && header->head.next != header)
-    {
-        // 多于一个节点: 普通摘除
-        if (node == header)
-        {
-            header = header->head.next; // 摘的是头, 则后移头指针
-        }
-        node->head.pre->head.next = node->head.next; // 前驱跳过 node
-        node->head.next->head.pre = node->head.pre;  // 后继跳过 node
-        list_init(node, node->head.size);            // node 变回孤立节点
-    }
-    else
-    {
-        // 链表只剩这一个节点: 摘除后整表为空
-        header = nullptr;
-    }
-}
 
 // ----------------------------------------------------------------------------
 // custom malloc
