@@ -8,7 +8,7 @@
 //   wageco::calloc(n, size) 分配 n*size 字节并清零; 溢出时返回 NULL
 //   wageco::realloc(addr, n) 调整大小; 语义与标准 realloc 一致
 //
-// 实现基于 sbrk() + 双向循环链表, 详见 src/mmemory.cpp。
+// 实现基于 sbrk() + 空闲链表 (双向循环), 详见 src/ 与 include/internal.h。
 // 注意: 仅支持 Linux (依赖 <unistd.h> 的 sbrk 与 pthread)。
 //
 // 日志 (spdlog, 环境变量可配置):
@@ -18,15 +18,15 @@
 //     - trace: 分割 / 合并 / 回收等细节
 //   MMEMORY_LOG_FILE=<path>  指定时改为追加模式写文件, 否则输出 stderr
 // ============================================================================
-#ifndef __WAGECO_MMEMORY_H_
-#define __WAGECO_MMEMORY_H_
+#ifndef MMEMORY_MMEMORY_H_
+#define MMEMORY_MMEMORY_H_
 #include <unistd.h>
 namespace wageco
 {
-void *malloc(size_t size);
-void free(void *addr);
-void *calloc(size_t num, size_t size);
-void *realloc(void *addr, size_t size);
-} // namespace wageco
+void* malloc(size_t size);
+void free(void* addr);
+void* calloc(size_t num, size_t size);
+void* realloc(void* addr, size_t size);
+}  // namespace wageco
 
 #endif

@@ -1,22 +1,23 @@
 // ============================================================================
-// mmemory.cpp - 教学用简易内存分配器: 核心 API 实现
+// mmemory.cpp - 教学用简易内存分配器: 对外 API (转发到全局分配器)
 // ----------------------------------------------------------------------------
 // 模块结构 (include/ + src/):
-//   internal.h  - 内部共享: header_t (嵌入 HeaderList::Node) / HeaderList 链表类
-//                 / 日志配置 (SPDLOG_ACTIVE_LEVEL) 与 get_logger 声明
-//   list.cpp    - HeaderList 链表实现 (只管 Node 链接, 与块数据解耦)
-//   log.cpp     - 日志系统实现 (spdlog 封装, 非热路径)
-//   mmemory.cpp - Allocator 类 (聚合"已分配/空闲"两条链表 + 互斥锁)
-//                 + 对外四个 API (转发到全局分配器实例)
+//   internal.h    - 内部共享: ListNode / IList / HeaderList / block_t /
+//                   Allocator 声明 + 日志配置
+//   list.cpp      - HeaderList: IList 的具体实现 (双向循环链表)
+//   allocator.cpp - Allocator 核心分配逻辑 (通过注入的 IList* 操作列表)
+//   log.cpp       - 日志系统实现 (spdlog 封装, 非热路径)
+//   mmemory.cpp   - 装配 (创建链表实现并注入分配器) + 四个对外 API (转发)
 //
-// 解耦要点: 分配器操作"宿主块" (header_t*), 链表操作"节点" (HeaderList::Node*),
-//   两者用 node_of()/header_of() 互转; 块大小通过 block_size_of() 提供给链表。
+// 依赖注入: 本文件是"组合根"——创建空闲链表实现, 通过 Allocator 构造函数
+//   注入 (策略模式)。以后想换链表实现 (如按大小分 bin),
+//   只需在这里换成新的 IList 实现, 其余代码零改动。
 //
 // 核心思路 (与经典 malloc 实现一脉相承):
 //   1. 用 sbrk() 系统调用从操作系统申请/归还堆空间;
 //   2. 每块内存前都有一个 header (元数据), 记录块大小与链表节点;
-//   3. Allocator 内部用两条 HeaderList 管理: 已分配块 (malloc_list) 与
-//      空闲块 (free_list), 实现块的复用与回收。
+//   3. Allocator 通过注入的空闲链表 (free_list) 管理空闲块;
+//      已分配状态由块头的 inuse 标志标识 (边界 tag 思路)。
 //
 // 支持的 API (位于 namespace wageco, 与标准库同名):
 //   wageco::malloc / wageco::free / wageco::calloc / wageco::realloc
@@ -32,299 +33,34 @@
 //     MMEMORY_LOG_FILE=<path>  指定则改为写文件 (追加), 否则 stderr
 // ============================================================================
 
-#include <errno.h>
-#include <pthread.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
 #include "internal.h"
 
 namespace wageco
 {
 // ----------------------------------------------------------------------------
-// Allocator - 分配器: 聚合"已分配/空闲"两条链表与互斥锁
+// 组合根 (dependency composition root): 装配"存储模式 + 内存申请"并注入分配器
 // ----------------------------------------------------------------------------
-// 职责:
-//   - 持有两条 HeaderList: malloc_list_ (已分配块) / free_list_ (空闲块);
-//   - 持有全局互斥锁 locker_, 保证链表操作与 brk 操作的原子性;
-//   - 对外提供四个核心操作 (方法), 与 public API 同名但作为类成员存在。
-// 扩展点: 以后加 per-thread arena / 空闲表按大小分 bin 时, 在这里增改成员即可。
-class Allocator
-{
-public:
-    // 两条链表都需要"取块大小"回调 (block_size_of), 因此显式初始化
-    Allocator() : malloc_list_(block_size_of), free_list_(block_size_of) {}
+// 空闲块链表实现 (存储模式: 双循环链表, 块大小回调读取; 已分配状态由
+// 块的 inuse 标志标识, 因此不再需要"已分配链表")
+static HeaderList g_free_list(block_size_of);
 
-    // 分配 size 字节, 返回 16 字节对齐的用户指针; 失败返回 nullptr
-    void *malloc(size_t size);
-    // 释放 malloc/calloc/realloc 返回的指针; nullptr 是合法参数
-    void free(void *addr);
-    // 分配 num*size 字节并清零; 溢出时返回 nullptr
-    void *calloc(size_t num, size_t size);
-    // 调整大小; 语义与标准 realloc 一致
-    void *realloc(void *addr, size_t size);
+// 空闲块查找策略 (默认 first-fit; 换 best-fit 只需改这里)
+static FirstFit g_first_fit;
 
-private:
-    HeaderList malloc_list_;                         // "已分配块" 链表
-    HeaderList free_list_;                           // "空闲块" 链表
-    pthread_mutex_t locker_ = PTHREAD_MUTEX_INITIALIZER; // 并发保护 (全局锁)
-};
+// 内存申请来源 (基于 sbrk 的内存提供者)
+static SbrkMemory g_memory;
 
-// 全局分配器实例 (本库唯一的分配器状态, 静态存储零初始化)
-static Allocator g_allocator;
-
-// ----------------------------------------------------------------------------
-// Allocator::malloc
-// ----------------------------------------------------------------------------
-// 流程:
-//   1. 需求大小按 16 字节对齐 (总占用 = header + 用户区, 向上取整到 16 倍数);
-//   2. 先在空闲链表中 first-fit 找一块够大的;
-//        - 命中: 若块过大则 split 分割, 剩余部分放回空闲链表, 然后取用;
-//        - 未命中: 调用 sbrk() 向操作系统要新的堆空间;
-//   3. 把块挂到已分配链表, 返回用户区指针 (header 之后)。
-void *Allocator::malloc(size_t size)
-{
-    if (!size)
-    {
-        return nullptr; // 语义: malloc(0) 允许返回 NULL
-    }
-    pthread_mutex_lock(&locker_);
-    // 总占用 = header(24) + 用户 size, 向上对齐到 16 的倍数
-    // 例如: size=1   -> total = (24+1+15)&~15 = 32
-    //        size=500 -> total = (24+500+15)&~15 = 528
-    size_t total_size = (sizeof(header_t) + size + align_to - 1) & ~(align_to - 1);
-    SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: request {} bytes (total {} with header)", size, total_size);
-    // search free list: 优先复用已释放的块 (链表返回节点, 转回宿主块)
-    HeaderList::Node *free_node = free_list_.find_first_fit(total_size - sizeof(header_t));
-    if (free_node)
-    {
-        header_t *node = header_of(free_node);
-        // 命中空闲块。块比需要的大时, 切出剩余部分 (split) 放回空闲链表,
-        // 避免大块被小块占住导致碎片。
-        size_t need_size = total_size - sizeof(header_t);
-        if (node->head.size >= need_size + sizeof(header_t) + align_to)
-        {
-            // 剩余部分还能构成一个"至少 16 字节用户区"的完整块才分割
-            header_t *rest = (header_t *)((char *)(node + 1) + need_size);
-            list_init(rest, node->head.size - need_size - sizeof(header_t));
-            free_list_.insert(node_of(rest));
-            node->head.size = need_size; // 取用部分缩小为正好需要的大小
-            SPDLOG_LOGGER_TRACE(get_logger(), "malloc: split free block, remainder {} bytes -> free list", rest->head.size);
-        }
-        // 从空闲链表摘除 -> 挂到已分配链表 (计数由 HeaderList 自动维护)
-        free_list_.remove(free_node);
-        malloc_list_.insert(node_of(node));
-        SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: reuse free block, start: {:p} (user {} bytes)", (void *)(node + 1), node->head.size);
-        pthread_mutex_unlock(&locker_);
-        return (void *)(node + 1); // 跳过 header, 返回用户区
-    }
-    // 空闲链表没有合适块: 通过 sbrk 向操作系统申请新内存
-    // (sbrk 把"程序断点" program break 向上移动, 返回旧断点地址)
-    void *now_addr = sbrk(total_size);
-    // failed
-    if (now_addr == (void *)-1)
-    {
-        SPDLOG_LOGGER_ERROR(get_logger(), "malloc failed, errno: {} ({})", errno, strerror(errno));
-        pthread_mutex_unlock(&locker_);
-        return nullptr;
-    }
-    // success: 新块初始化并挂到已分配链表
-    header_t *node = (header_t *)now_addr;
-    list_init(node, total_size - sizeof(header_t));
-    malloc_list_.insert(node_of(node));
-    pthread_mutex_unlock(&locker_);
-    SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: sbrk new block, total {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
-    // remove header: 用户只看到 header 之后的区域
-    return (void *)(node + 1);
-}
-
-// ----------------------------------------------------------------------------
-// Allocator::free
-// ----------------------------------------------------------------------------
-// 流程:
-//   1. 由用户指针回退得到 header, 校验合法性 (防 double free / 释放未分配内存);
-//   2. 从已分配链表摘除;
-//   3. 合并物理相邻的空闲块 (前驱 pred / 后继 succ), 缓解碎片;
-//   4. 若合并后的块位于堆顶 (program break 处), 把整段 (含其下方相邻的
-//      空闲块链) 通过 sbrk(-) 归还操作系统; 否则挂回空闲链表待复用。
-void Allocator::free(void *addr)
-{
-    if (!addr)
-    {
-        return; // free(NULL) 是合法空操作
-    }
-    header_t *node = (header_t *)addr - 1; // 回退 24 字节拿到 header
-    pthread_mutex_lock(&locker_);
-    // 合法性校验: 已在空闲链表 (double free) 或不在已分配链表 (非法指针)
-    if (free_list_.contains(node_of(node)) || !malloc_list_.contains(node_of(node)))
-    {
-        SPDLOG_LOGGER_ERROR(get_logger(), "free: double free or no malloc, start: {:p}", (void *)node);
-        pthread_mutex_unlock(&locker_);
-        return;
-    }
-    SPDLOG_LOGGER_DEBUG(get_logger(), "free: addr {:p} -> block {:p} (user {} bytes)", addr, (void *)node, node->head.size);
-    void *program_break_now = sbrk(0); // 记录当前堆顶, 供后续判断是否可收缩
-    malloc_list_.remove(node_of(node));
-
-    // --- 合并 (coalescing): 把物理相邻的空闲块并成一块 ---
-    // 1) 后继合并: node 后面紧邻一块空闲块, 则把它并入 node
-    HeaderList::Node *succ_node = free_list_.find_next_phys(node_of(node));
-    if (succ_node)
-    {
-        header_t *succ = header_of(succ_node);
-        free_list_.remove(succ_node);
-        node->head.size += sizeof(header_t) + succ->head.size;
-        SPDLOG_LOGGER_TRACE(get_logger(), "free: coalesce next block {:p}, block now {} bytes", (void *)succ, node->head.size);
-    }
-    // 2) 前驱合并: node 前面紧邻一块空闲块, 则把 node 并入前驱
-    HeaderList::Node *pred_node = free_list_.find_prev_phys(node_of(node));
-    if (pred_node)
-    {
-        header_t *pred = header_of(pred_node);
-        free_list_.remove(pred_node);
-        pred->head.size += sizeof(header_t) + node->head.size;
-        node = pred; // 合并后的块用前驱表示
-        SPDLOG_LOGGER_TRACE(get_logger(), "free: coalesce into prev block {:p}, block now {} bytes", (void *)node, node->head.size);
-    }
-
-    // --- 堆顶收缩: 能还就还给操作系统 ---
-    // 若合并后的块物理末尾 == program break, 说明它是堆上最后一块,
-    // 可以直接 sbrk(-) 把空间归还 (这部分内存"零成本"回收)。
-    if ((char *)node + sizeof(header_t) + node->head.size == program_break_now)
-    {
-        // 连带回收其下方"物理相邻且已释放"的空闲块链:
-        // 例如下方还有 2 个连续空闲块, 一并归还, 避免它们滞留堆中。
-        size_t reclaim = sizeof(header_t) + node->head.size;
-        header_t *p = node;
-        for (;;)
-        {
-            HeaderList::Node *prev_node = free_list_.find_prev_phys(node_of(p));
-            if (!prev_node)
-            {
-                break;
-            }
-            header_t *prev = header_of(prev_node);
-            free_list_.remove(prev_node);
-            reclaim += sizeof(header_t) + prev->head.size;
-            SPDLOG_LOGGER_TRACE(get_logger(), "free: reclaim contiguous prev block {:p} ({} bytes)", (void *)prev, prev->head.size);
-            p = prev;
-        }
-        // 回收链整体视为一块: 更新最底块的 size (供收缩失败时放回空闲链表)
-        p->head.size = reclaim - sizeof(header_t);
-        SPDLOG_LOGGER_DEBUG(get_logger(), "free: reclaim {} bytes, start: {:p}", reclaim, (void *)sbrk(0));
-        // free memory space: sbrk 传负数表示把断点下移 (归还内存)
-        if (sbrk(0 - reclaim) == (void *)-1)
-        {
-            SPDLOG_LOGGER_ERROR(get_logger(), "free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
-            // 归还失败: 把整条回收链放回空闲链表, 避免内存丢失
-            free_list_.insert(node_of(p));
-            pthread_mutex_unlock(&locker_);
-            return;
-        }
-    }
-    else
-    {
-        // 不是堆顶块: 挂回空闲链表, 等后续 malloc 复用 / 合并
-        free_list_.insert(node_of(node));
-        SPDLOG_LOGGER_TRACE(get_logger(), "free: block {:p} (user {} bytes) -> free list", (void *)(node + 1), node->head.size);
-    }
-
-    if (malloc_list_.empty() && !free_list_.empty())
-    {
-        // TODO: 理论上全部释放后可以把整堆归还; 现在依赖上面的"堆顶连带回收"
-        //       已经能覆盖绝大多数情况, 这里留作扩展点。
-    }
-    pthread_mutex_unlock(&locker_);
-}
-
-// ----------------------------------------------------------------------------
-// Allocator::calloc = malloc + 清零
-// ----------------------------------------------------------------------------
-void *Allocator::calloc(size_t num, size_t size)
-{
-    if (!num || !size)
-    {
-        return nullptr;
-    }
-    // 溢出检查: num * size 可能超过 size_t 上限
-    if (num > (size_t)-1 / size)
-    {
-        SPDLOG_LOGGER_ERROR(get_logger(), "calloc: size overflow ({} x {})", num, size);
-        return nullptr;
-    }
-    size_t total_size = num * size;
-    void *addr = malloc(total_size);
-    if (!addr)
-    {
-        return nullptr;
-    }
-    memset(addr, 0, total_size); // 置零
-    SPDLOG_LOGGER_TRACE(get_logger(), "calloc: {} x {} = {} bytes, zeroed", num, size, total_size);
-    return addr;
-}
-
-// ----------------------------------------------------------------------------
-// Allocator::realloc
-// ----------------------------------------------------------------------------
-// 语义 (与标准 realloc 对齐):
-//   - realloc(ptr, 0)   -> 释放 ptr 并返回 NULL;
-//   - realloc(NULL, n)  -> 等价 malloc(n);
-//   - 原块够大          -> 原地返回, 不动数据;
-//   - 原块不够大        -> 新分配 + 拷贝旧数据 + 释放旧块。
-void *Allocator::realloc(void *addr, size_t size)
-{
-    if (!size)
-    {
-        // 标准语义: 释放并返回 NULL (历史版本漏了 free, 会泄漏)
-        SPDLOG_LOGGER_DEBUG(get_logger(), "realloc: size 0, freeing {:p}", addr);
-        free(addr);
-        return nullptr;
-    }
-    if (!addr)
-    {
-        SPDLOG_LOGGER_DEBUG(get_logger(), "realloc: NULL addr, malloc {} bytes", size);
-        return malloc(size);
-    }
-    header_t *node = (header_t *)addr - 1;
-    if (node->head.size >= size)
-    {
-        SPDLOG_LOGGER_TRACE(get_logger(), "realloc: in-place, old {} >= new {}", node->head.size, size);
-        return addr; // 原地满足, 直接返回 (不分割, 教学取舍)
-    }
-    // 需要扩容: 重新分配, 拷贝旧数据, 释放旧块
-    SPDLOG_LOGGER_DEBUG(get_logger(), "realloc: growing {:p} from {} to {} bytes", addr, node->head.size, size);
-    void *new_addr = malloc(size);
-    if (new_addr)
-    {
-        // 只拷贝旧块实际可用的大小, 避免越界读
-        memcpy(new_addr, addr, node->head.size);
-        free(addr);
-        SPDLOG_LOGGER_TRACE(get_logger(), "realloc: moved to {:p} (copied {} bytes)", new_addr, node->head.size);
-    }
-    return new_addr;
-}
+// 全局分配器实例: 注入"存储模式 + 内存申请 + 查找策略"三个依赖
+static Allocator g_allocator(&g_free_list, &g_memory, &g_first_fit);
 
 // ----------------------------------------------------------------------------
 // 对外 API: 转发到全局分配器实例
 // ----------------------------------------------------------------------------
-void *malloc(size_t size)
-{
-    return g_allocator.malloc(size);
-}
+void* malloc(size_t size) { return g_allocator.malloc(size); }
 
-void free(void *addr)
-{
-    g_allocator.free(addr);
-}
+void free(void* addr) { g_allocator.free(addr); }
 
-void *calloc(size_t num, size_t size)
-{
-    return g_allocator.calloc(num, size);
-}
+void* calloc(size_t num, size_t size) { return g_allocator.calloc(num, size); }
 
-void *realloc(void *addr, size_t size)
-{
-    return g_allocator.realloc(addr, size);
-}
-} // namespace wageco
+void* realloc(void* addr, size_t size) { return g_allocator.realloc(addr, size); }
+}  // namespace wageco
