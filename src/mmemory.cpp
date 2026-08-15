@@ -1,15 +1,19 @@
 // ============================================================================
 // mmemory.cpp - 教学用简易内存分配器: 核心 API 实现
 // ----------------------------------------------------------------------------
-// 模块结构 (src/):
-//   internal.h  - 内部共享: 块头 header_t / HeaderList 链表类 (含节点计数)
+// 模块结构 (include/ + src/):
+//   internal.h  - 内部共享: header_t (嵌入 HeaderList::Node) / HeaderList 链表类
 //                 / 日志配置 (SPDLOG_ACTIVE_LEVEL) 与 get_logger 声明
+//   list.cpp    - HeaderList 链表实现 (只管 Node 链接, 与块数据解耦)
 //   log.cpp     - 日志系统实现 (spdlog 封装, 非热路径)
 //   mmemory.cpp - 全局分配器状态 + malloc/free/calloc/realloc
 //
+// 解耦要点: 分配器操作"宿主块" (header_t*), 链表操作"节点" (HeaderList::Node*),
+//   两者用 node_of()/header_of() 互转; 块大小通过 block_size_of() 提供给链表。
+//
 // 核心思路 (与经典 malloc 实现一脉相承):
 //   1. 用 sbrk() 系统调用从操作系统申请/归还堆空间;
-//   2. 每块内存前都有一个 header (元数据), 记录块大小与链表指针;
+//   2. 每块内存前都有一个 header (元数据), 记录块大小与链表节点;
 //   3. 用两个 HeaderList 分别管理: 已分配块 (malloc_list) 与
 //      空闲块 (free_list), 实现块的复用与回收。
 //
@@ -41,8 +45,9 @@ namespace wageco
 // 分配器全局状态
 // ----------------------------------------------------------------------------
 // 已分配块链表 / 空闲块链表 (静态存储, 零初始化; 节点计数由 HeaderList 内部维护)
-static HeaderList malloc_list;
-static HeaderList free_list;
+// 每个链表通过 block_size_of 回调获取节点对应块的大小 (解耦: 链表不直接认识 header_t)
+static HeaderList malloc_list(block_size_of);
+static HeaderList free_list(block_size_of);
 
 // 多线程防竞争: 所有链表操作/brk 操作都在这把全局锁内完成。
 // 简单可靠, 但并发场景会串行化 —— 教学取舍。
@@ -64,15 +69,16 @@ void *malloc(size_t size)
         return nullptr; // 语义: malloc(0) 允许返回 NULL
     }
     pthread_mutex_lock(&list_locker);
-    // 总占用 = header(16) + 用户 size, 向上对齐到 16 的倍数
-    // 例如: size=1   -> total = (16+1+15)&~15 = 32
-    //        size=500 -> total = (16+500+15)&~15 = 528
+    // 总占用 = header(24) + 用户 size, 向上对齐到 16 的倍数
+    // 例如: size=1   -> total = (24+1+15)&~15 = 32
+    //        size=500 -> total = (24+500+15)&~15 = 528
     size_t total_size = (sizeof(header_t) + size + align_to - 1) & ~(align_to - 1);
     SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: request {} bytes (total {} with header)", size, total_size);
-    // search free list: 优先复用已释放的块
-    header_t *node = free_list.find_first_fit(total_size - sizeof(header_t));
-    if (node)
+    // search free list: 优先复用已释放的块 (链表返回节点, 转回宿主块)
+    HeaderList::Node *free_node = free_list.find_first_fit(total_size - sizeof(header_t));
+    if (free_node)
     {
+        header_t *node = header_of(free_node);
         // 命中空闲块。块比需要的大时, 切出剩余部分 (split) 放回空闲链表,
         // 避免大块被小块占住导致碎片。
         size_t need_size = total_size - sizeof(header_t);
@@ -81,13 +87,13 @@ void *malloc(size_t size)
             // 剩余部分还能构成一个"至少 16 字节用户区"的完整块才分割
             header_t *rest = (header_t *)((char *)(node + 1) + need_size);
             list_init(rest, node->head.size - need_size - sizeof(header_t));
-            free_list.insert(rest);
+            free_list.insert(node_of(rest));
             node->head.size = need_size; // 取用部分缩小为正好需要的大小
             SPDLOG_LOGGER_TRACE(get_logger(), "malloc: split free block, remainder {} bytes -> free list", rest->head.size);
         }
         // 从空闲链表摘除 -> 挂到已分配链表 (计数由 HeaderList 自动维护)
-        free_list.remove(node);
-        malloc_list.insert(node);
+        free_list.remove(free_node);
+        malloc_list.insert(node_of(node));
         SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: reuse free block, start: {:p} (user {} bytes)", (void *)(node + 1), node->head.size);
         pthread_mutex_unlock(&list_locker);
         return (void *)(node + 1); // 跳过 header, 返回用户区
@@ -103,9 +109,9 @@ void *malloc(size_t size)
         return nullptr;
     }
     // success: 新块初始化并挂到已分配链表
-    node = (header_t *)now_addr;
+    header_t *node = (header_t *)now_addr;
     list_init(node, total_size - sizeof(header_t));
-    malloc_list.insert(node);
+    malloc_list.insert(node_of(node));
     pthread_mutex_unlock(&list_locker);
     SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: sbrk new block, total {} bytes (user {}), start: {:p}", total_size, size, (void *)sbrk(0));
     // remove header: 用户只看到 header 之后的区域
@@ -127,10 +133,10 @@ void free(void *addr)
     {
         return; // free(NULL) 是合法空操作
     }
-    header_t *node = (header_t *)addr - 1; // 回退 16 字节拿到 header
+    header_t *node = (header_t *)addr - 1; // 回退 24 字节拿到 header
     pthread_mutex_lock(&list_locker);
     // 合法性校验: 已在空闲链表 (double free) 或不在已分配链表 (非法指针)
-    if (free_list.contains(node) || !malloc_list.contains(node))
+    if (free_list.contains(node_of(node)) || !malloc_list.contains(node_of(node)))
     {
         SPDLOG_LOGGER_ERROR(get_logger(), "free: double free or no malloc, start: {:p}", (void *)node);
         pthread_mutex_unlock(&list_locker);
@@ -138,22 +144,24 @@ void free(void *addr)
     }
     SPDLOG_LOGGER_DEBUG(get_logger(), "free: addr {:p} -> block {:p} (user {} bytes)", addr, (void *)node, node->head.size);
     void *program_break_now = sbrk(0); // 记录当前堆顶, 供后续判断是否可收缩
-    malloc_list.remove(node);
+    malloc_list.remove(node_of(node));
 
     // --- 合并 (coalescing): 把物理相邻的空闲块并成一块 ---
     // 1) 后继合并: node 后面紧邻一块空闲块, 则把它并入 node
-    header_t *succ = free_list.find_next_phys(node);
-    if (succ)
+    HeaderList::Node *succ_node = free_list.find_next_phys(node_of(node));
+    if (succ_node)
     {
-        free_list.remove(succ);
+        header_t *succ = header_of(succ_node);
+        free_list.remove(succ_node);
         node->head.size += sizeof(header_t) + succ->head.size;
         SPDLOG_LOGGER_TRACE(get_logger(), "free: coalesce next block {:p}, block now {} bytes", (void *)succ, node->head.size);
     }
     // 2) 前驱合并: node 前面紧邻一块空闲块, 则把 node 并入前驱
-    header_t *pred = free_list.find_prev_phys(node);
-    if (pred)
+    HeaderList::Node *pred_node = free_list.find_prev_phys(node_of(node));
+    if (pred_node)
     {
-        free_list.remove(pred);
+        header_t *pred = header_of(pred_node);
+        free_list.remove(pred_node);
         pred->head.size += sizeof(header_t) + node->head.size;
         node = pred; // 合并后的块用前驱表示
         SPDLOG_LOGGER_TRACE(get_logger(), "free: coalesce into prev block {:p}, block now {} bytes", (void *)node, node->head.size);
@@ -170,12 +178,13 @@ void free(void *addr)
         header_t *p = node;
         for (;;)
         {
-            header_t *prev = free_list.find_prev_phys(p);
-            if (!prev)
+            HeaderList::Node *prev_node = free_list.find_prev_phys(node_of(p));
+            if (!prev_node)
             {
                 break;
             }
-            free_list.remove(prev);
+            header_t *prev = header_of(prev_node);
+            free_list.remove(prev_node);
             reclaim += sizeof(header_t) + prev->head.size;
             SPDLOG_LOGGER_TRACE(get_logger(), "free: reclaim contiguous prev block {:p} ({} bytes)", (void *)prev, prev->head.size);
             p = prev;
@@ -188,7 +197,7 @@ void free(void *addr)
         {
             SPDLOG_LOGGER_ERROR(get_logger(), "free: sbrk shrink failed, errno: {} ({})", ENOMEM, strerror(ENOMEM));
             // 归还失败: 把整条回收链放回空闲链表, 避免内存丢失
-            free_list.insert(p);
+            free_list.insert(node_of(p));
             pthread_mutex_unlock(&list_locker);
             return;
         }
@@ -196,7 +205,7 @@ void free(void *addr)
     else
     {
         // 不是堆顶块: 挂回空闲链表, 等后续 malloc 复用 / 合并
-        free_list.insert(node);
+        free_list.insert(node_of(node));
         SPDLOG_LOGGER_TRACE(get_logger(), "free: block {:p} (user {} bytes) -> free list", (void *)(node + 1), node->head.size);
     }
 
