@@ -14,6 +14,10 @@
       host_traits 宿主泛型化 (HeaderList<HostT> 可服务任意宿主);
       与 master 形成"运行时多态 vs 编译期多态"的教学对比
       (实测同量级:依赖注入方式对性能影响有限,瓶颈在系统调用与锁);
+- [x] **编译期函数式 (functional.h)**:把计算层 (对齐/档位) 收敛为 constexpr
+      纯函数, 用模板递归/特化 + constexpr 纯函数在编译期生成 size→bin 查找表
+      (static_assert 编译期单元测试), 为 size-class bin 预演; 明确了
+      函数式编程在分配器里的适用边界 (计算层适合, 可变状态内核不适合);
 - [ ] **size-class bin 分级**:空闲链表按大小分桶(如 16/32/64/.../2KB),查找从 O(n)
       降到近似 O(1),替代单一 HeaderList(练习新 `IList` 实现,分配器零改动);
 - [ ] **realloc 缩容分割**:缩容时把多余部分分割挂回空闲链表,回收空间;

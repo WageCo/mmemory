@@ -40,6 +40,7 @@
 #include <type_traits>  // integral_constant / true_type / false_type / declval
 
 #include "find_strategy.h"  // 策略模板 (FirstFit/BestFit)
+#include "functional.h"     // 编译期纯函数: block_total
 #include "list.h"           // HeaderList / ListNode / init_free
 #include "logging.h"        // get_logger / SPDLOG_LOGGER_* 宏
 #include "memory.h"         // SbrkMemory / memory_traits
@@ -154,7 +155,8 @@ class Allocator
         // 总占用 = block_t(16) + 用户 size, 向上对齐到 16 的倍数
         // 例如: size=1   -> total = (16+1+15)&~15 = 32
         //        size=500 -> total = (16+500+15)&~15 = 528
-        size_t total_size = (sizeof(block_t) + size + align_to - 1) & ~(align_to - 1);
+        // (纯函数 block_total 见 functional.h, constexpr 且配编译期测试)
+        size_t total_size = block_total(size);
         SPDLOG_LOGGER_DEBUG(get_logger(), "malloc: request {} bytes (total {} with block header)", size, total_size);
         // search free list: 按注入的查找策略找可用块 (链表返回节点, 转回宿主块)
         ListNode* free_node = strategy_->find(*free_list_, total_size - sizeof(block_t));

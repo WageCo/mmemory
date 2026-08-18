@@ -87,6 +87,13 @@ Tcache<kMaxBytes, kBinLimit>  线程本地小对象缓存模板 (公共 API 前�
   ├─ 档满: 整档倒回全局分配器 (缓存只延迟回收, 不阻止回收)
   └─ 编译期约束: 模板参数非法 (非 16 倍数/为 0) 直接编译报错
 
+functional.h            编译期函数式层 (constexpr 纯函数 + 表生成)
+  ├─ align_up / block_total / align_user_size / bin_of   对齐与档位纯函数
+  ├─ BinSizeAt<Bin>      类型级递归 (模板特化)
+  ├─ bin_of_recursive    值级递归 (constexpr 递归函数)
+  └─ kReqToBin           编译期生成 size→bin 查找表 (static_assert 校验)
+     ↑ Allocator::malloc / Tcache::bin_of_request 已接入纯函数
+
 Allocator<ListT, MemoryT, StrategyT>   ← 三个依赖编译期注入 (模板实参)
    ↑ 编译期接口约束 (SFINAE + static_assert): 依赖类型必须提供关键成员
 wageco::malloc/free/calloc/realloc    ← tcache 快路径 + 转发到全局 g_allocator
@@ -147,6 +154,30 @@ wageco::malloc/free/calloc/realloc    ← tcache 快路径 + 转发到全局 g_a
 **断点缓存**:独占堆契约下本库是唯一 sbrk 使用者,`SbrkMemory` 缓存当前断点
 (`cur_break_`,由 allocate/release_block 同步维护),`owns_address` 校验只做
 内存比较,不在热路径调用 `sbrk(0)`。
+
+### 编译期函数式(见 `include/functional.h`)
+
+函数式编程在分配器里的适用边界:**计算层(无状态、输入→输出)适合纯函数式;
+内核(链表/指针/锁)是可变状态机,不适合**。本头在计算层演示三种函数式
+形态,全部编译期求值、零运行时开销,每个函数都配 `static_assert` 编译期
+单元测试(算错直接编译失败):
+
+1. **constexpr 纯函数族**:`align_up` / `block_total` / `align_user_size` /
+   `bin_of` / `bin_user_size` —— 对齐与档位的输入→输出函数,`Allocator::malloc`
+   与 `Tcache::bin_of_request` 已接入(`block_total(size)` 替代手写位运算,
+   行为逐位一致);
+2. **类型级递归(模板特化)**:`BinSizeAt<Bin>` —— 编译期"递归函数",
+   基准情形 + 递归情形,展示"类型即函数"的元编程形态;
+3. **值级递归(constexpr 递归)**:`bin_of_recursive` —— 递归即循环的函数式
+   写法(无循环变量、无可变状态,状态通过参数传递);
+4. **编译期表生成**:`make_req_to_bin_table()` 用 constexpr 纯函数构造
+   `size→bin` 查找表(请求 0..1024 → 档位),编译期求值后进只读段,
+   `static_assert` 静态校验表内容——这是"数据即函数"形态,也是
+   size-class bin 分级的预演(将来做 bin 表直接复用这套手法)。
+
+> 接入方式:对齐/档位计算全部收敛到纯函数,`Tcache` 的 `bin_of_request`
+> 与表在 `CompileTimeTableTest` 中全量比对一致(编译期生成的数据与
+> 运行时计算殊途同归)。
 
 ## 测试结果
 

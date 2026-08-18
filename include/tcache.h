@@ -27,7 +27,8 @@
 
 #include <stddef.h>  // size_t
 
-#include "block.h"  // block_t / align_to
+#include "block.h"       // block_t / align_to
+#include "functional.h"  // 编译期纯函数: bin_of / align_user_size
 
 namespace wageco
 {
@@ -54,14 +55,12 @@ class Tcache
     // 请求 size -> 档位索引 (前提: covers(size); 对齐后用户区 16B->0, 32B->1, ...)
     static size_t bin_of_request(size_t size)
     {
-        // 与 Allocator::malloc 相同的对齐公式: 总占用 = 16 对齐(16 + size),
-        // 用户区 = 总占用 - 16。size <= kMaxBytes 时无溢出风险 (装配点已保证)。
-        const size_t total = (sizeof(block_t) + size + align_to - 1) & ~(align_to - 1);
-        const size_t user_size = total - sizeof(block_t);
-        return user_size / align_to - 1;
+        // 编译期纯函数 (见 functional.h): 请求 -> 对齐用户区 -> 档位。
+        // 与 Allocator::malloc 的对齐公式完全一致, size <= kMaxBytes 时无溢出。
+        return bin_of(align_user_size(size));
     }
     // 块头用户区大小 -> 档位索引 (head.size 恒为 16 倍数, 16B->0, 32B->1, ...)
-    static size_t bin_of_block(size_t user_size) { return user_size / align_to - 1; }
+    static size_t bin_of_block(size_t user_size) { return bin_of(user_size); }
 
     // 从档位弹出一块 (缓存命中), 无则返回 nullptr; 命中后 inuse 置回 true
     void* pop(size_t bin)

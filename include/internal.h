@@ -6,9 +6,10 @@
 // IFindStrategy) 全部删除, 依赖通过模板参数注入, 头文件依赖方向:
 //   block.h         块层: align_to / block_t / node_of / block_of /
 //                   block_size_of (ListNode 仅前向声明, 无依赖)
-//   list.h          链表层: ListNode / init_free / HeaderList<SizeFn>
+//   list.h          链表层: ListNode / init_free / host_traits / HeaderList<HostT>
 //                   (包含 block.h, 模板化, header-only)
-//   memory.h        内存提供者层: SbrkMemory (普通类, 非虚方法)
+//   functional.h    编译期函数式层: constexpr 纯函数 / 模板递归 / 表生成
+//   memory.h        内存提供者层: SbrkMemory + memory_traits (编译期能力)
 //   find_strategy.h 查找策略层: FirstFit / BestFit (模板成员函数)
 //   tcache.h        线程本地缓存层: Tcache<kMaxBytes, kBinLimit>
 //   allocator.h     分配器层: Allocator<ListT, MemoryT, StrategyT>
@@ -27,6 +28,7 @@
 #include "allocator.h"
 #include "block.h"
 #include "find_strategy.h"
+#include "functional.h"
 #include "list.h"
 #include "logging.h"
 #include "memory.h"

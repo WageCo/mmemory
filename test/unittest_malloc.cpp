@@ -537,4 +537,32 @@ TEST(testMalloc, CompileTimeDispatchTest)
     // 编译期选中"随机释放"路径: 直接 release_block, 而不是反向释放循环
     EXPECT_EQ(mem.release_calls, 1);
 }
+
+// ============================================================================
+// 模板分支演示: 编译期函数式 —— 表/纯函数/递归的一致性
+// ============================================================================
+// functional.h 里的 static_assert 已在编译期验证纯函数与表; 本测试在运行时
+// 全量比对编译期生成的查找表与算术纯函数 (以及 Tcache 的接入), 证明
+// "编译期生成的数据"与"运行时计算"殊途同归。
+TEST(testMalloc, CompileTimeTableTest)
+{
+    // 1) 编译期表 vs 纯函数算术: 每个请求大小逐一比对
+    for (size_t req = 0; req <= wageco::kMaxCachedBytes; ++req)
+    {
+        size_t expect = req == 0 ? 0 : wageco::bin_of(wageco::align_user_size(req));
+        EXPECT_EQ(wageco::kReqToBin.values[req], expect) << "req=" << req;
+    }
+    // 2) Tcache 接入的 bin_of_request 与表一致 (请求 1..缓存上限;
+    //    上限取 functional.h 的 kMaxCachedBytes, 与 Tcache<> 默认一致)
+    for (size_t req = 1; req <= wageco::kMaxCachedBytes; ++req)
+    {
+        EXPECT_EQ(wageco::Tcache<>::bin_of_request(req), wageco::kReqToBin.values[req]) << "tcache req=" << req;
+    }
+    // 3) 类型级递归 BinSizeAt 与算术 bin_user_size 一致 (编译期 static_assert
+    //    已验 0/3/63 档, 这里抽验边界档)
+    EXPECT_EQ(wageco::BinSizeAt<0>::value, 16u);
+    EXPECT_EQ(wageco::BinSizeAt<63>::value, 1024u);
+    // 4) 值级递归 bin_of_recursive 与算术 bin_of 一致
+    EXPECT_EQ(wageco::bin_of_recursive(1024), wageco::bin_of(1024));
+}
 #endif  // MMEMORY_TEST_CUSTOM
