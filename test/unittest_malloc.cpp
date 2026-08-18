@@ -214,10 +214,15 @@ TEST(testMalloc, DoubleFreeTest)
 //   分配 20000 块随机大小, 乱序释放全部, 断言 program break 基本回到原值。
 //   修复前 (无合并): 乱序释放的块滞留空闲链表, 堆无法回收, 该断言必挂;
 //   修复后 (合并 + 反向释放): 全部回收, 断言通过。
+//   注意: 小块的释放先进线程本地缓存 (tcache), 需要先 flush_tcache 把缓存
+//   块倒回全局分配器, 才能参与合并与反向释放 —— 缓存只延迟回收, 不阻止回收。
+//   因此本测试在记录 brk0 前先 flush 一次 (清掉前序测试滞留的缓存块, 建立
+//   干净基线), 末尾再 flush 一次 (让本测试的缓存块也参与回收)。
 TEST(testMalloc, FragmentationShrinkTest)
 {
     const int N = 20000;
     void* ptrs[N];
+    wageco::flush_tcache();  // 先清空线程本地缓存, 建立干净的 brk 基线
     char* brk0 = (char*)sbrk(0);
     for (int i = 0; i < N; ++i)
     {
@@ -239,9 +244,108 @@ TEST(testMalloc, FragmentationShrinkTest)
     {
         DEALLOC(ptrs[i]);
     }
+    wageco::flush_tcache();  // 把线程本地缓存中的块全部倒回全局分配器
     char* brk1 = (char*)sbrk(0);
     // 全部释放后堆应基本回收 (< 4KB 容差, 修复前会残留数百 KB 甚至更多)
     EXPECT_LT((size_t)(brk1 - brk0), 4096);
+}
+
+// tcache (线程本地缓存) 行为测试
+//   - 小对象: 释放后再次分配同大小应命中缓存, 复用同一块 (零锁快路径);
+//   - 大对象 (> 缓存上限 1024B): 不走缓存, 但行为一致;
+//   - 混合大小交错分配/释放: 数据完好性;
+//   - flush_tcache 把滞留缓存块倒回全局分配器, 不破坏后续分配。
+TEST(testMalloc, TcacheTest)
+{
+    // 小对象: free 后同一线程再次 malloc 同大小应命中缓存 (返回同一地址)
+    void* a = ALLOC(64);
+    ASSERT_NE(a, nullptr);
+    DEALLOC(a);
+    void* b = ALLOC(64);
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(a, b);  // tcache 命中: 复用刚释放的块
+    DEALLOC(b);
+
+    // 大对象 (4096 > 1024 缓存上限): 不走缓存, 行为不变
+    void* big1 = ALLOC(4096);
+    ASSERT_NE(big1, nullptr);
+    DEALLOC(big1);
+    void* big2 = ALLOC(4096);
+    ASSERT_NE(big2, nullptr);
+    DEALLOC(big2);
+
+    // 混合大小交错分配/释放, 释放前校验数据完好
+    for (int i = 0; i < 200; ++i)
+    {
+        size_t sz = (size_t)((i % 8 + 1) * 16);  // 16/32/.../128
+        void* p = ALLOC(sz);
+        ASSERT_NE(p, nullptr);
+        memset(p, (int)(i & 0xFF), sz);
+        const unsigned char* b = (const unsigned char*)p;
+        bool ok = true;
+        for (size_t j = 0; j < sz; ++j)
+        {
+            if (b[j] != (unsigned char)(i & 0xFF))
+            {
+                ok = false;
+                break;
+            }
+        }
+        EXPECT_TRUE(ok) << "data corrupted, i=" << i;
+        DEALLOC(p);
+    }
+
+    // 缓存滞留的块可由 flush_tcache 倒回 (不破坏后续分配/释放)
+    for (int i = 0; i < 100; ++i)
+    {
+        void* p = ALLOC(32);
+        ASSERT_NE(p, nullptr);
+        DEALLOC(p);
+    }
+    wageco::flush_tcache();
+    void* c = ALLOC(32);
+    ASSERT_NE(c, nullptr);
+    DEALLOC(c);
+    wageco::flush_tcache();
+}
+
+// tcache 多线程冒烟测试: 每线程独立缓存, 并发小对象分配/释放
+// (验证 thread_local 隔离 + 数据完好; 小对象场景不再被全局锁串行化)
+TEST(testMalloc, TcacheThreadTest)
+{
+    constexpr int kThreads = 4;
+    constexpr int kIters = 20000;
+    pthread_t threads[kThreads];
+    auto worker = [](void*) -> void*
+    {
+        for (int i = 0; i < kIters; ++i)
+        {
+            size_t sz = (size_t)((i % 4 + 1) * 32);  // 32/64/96/128
+            void* p = ALLOC(sz);
+            if (!p)
+            {
+                return (void*)1;
+            }
+            memset(p, (int)(i & 0xFF), sz);
+            DEALLOC(p);
+        }
+        return nullptr;
+    };
+    for (int t = 0; t < kThreads; ++t)
+    {
+        ASSERT_EQ(pthread_create(&threads[t], nullptr, worker, nullptr), 0);
+    }
+    for (int t = 0; t < kThreads; ++t)
+    {
+        void* ret = nullptr;
+        ASSERT_EQ(pthread_join(threads[t], &ret), 0);
+        EXPECT_EQ(ret, nullptr) << "thread " << t << " allocation failed";
+    }
+    // 主线程缓存与各工作线程缓存互不影响, 倒回后一切正常
+    wageco::flush_tcache();
+    void* p = ALLOC(64);
+    ASSERT_NE(p, nullptr);
+    DEALLOC(p);
 }
 
 // BestFit 查找策略冒烟测试: 验证策略可注入且分配/释放行为正确

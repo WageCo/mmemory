@@ -7,6 +7,7 @@
 //   block.h        块层: 对齐 / block_t / 块-节点互转 helpers (依赖 list.h)
 //   memory.h       内存提供者层: IMemory / SbrkMemory
 //   find_strategy.h 查找策略层: IFindStrategy / FirstFit / BestFit
+//   tcache.h       线程本地缓存层: Tcache (公共 API 前的 per-thread 快路径)
 //   allocator.h    分配器层: Allocator (依赖以上各层)
 //
 // 物理解耦 (边界 tag 思路, 与 dlmalloc 一致):
@@ -25,5 +26,6 @@
 #include "list.h"
 #include "logging.h"
 #include "memory.h"
+#include "tcache.h"
 
 #endif  // MMEMORY_INTERNAL_H

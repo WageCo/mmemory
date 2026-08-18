@@ -50,10 +50,13 @@ class IMemory
 // 释放采用"物理判据": release_block 仅当 块末尾(addr+size) == 当前断点
 // 时才用 brk 归还 —— 这等价于"按申请顺序反向释放"(堆天然是栈),
 // 且天然支持块合并 (合并块末尾贴着断点即可归还, 无需额外同步)。
+// 断点缓存: 独占堆契约 (README"已知限制") 下本库是唯一 sbrk 使用者,
+// 因此缓存"当前断点" cur_break_ (allocate/release_block 时同步更新),
+// owns_address 只做内存比较, 不在热路径调用 sbrk(0)。
 class SbrkMemory : public IMemory
 {
    public:
-    SbrkMemory();  // 记录堆起点 (首次分配前)
+    SbrkMemory();  // 记录堆起点与当前断点 (首次分配前)
 
     void* allocate(size_t size) override;
     bool supports_random_release() const override;
@@ -66,6 +69,7 @@ class SbrkMemory : public IMemory
 
    private:
     void* heap_start_;  // 本提供者感知的堆起点 (首次分配前记录)
+    void* cur_break_;   // 缓存当前断点 (独占堆契约下由本库维护)
 
 #ifdef DEBUG
     size_t alloc_bytes_ = 0;    // 累计申请字节 (DEBUG)

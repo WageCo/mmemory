@@ -20,9 +20,11 @@
 
 namespace wageco
 {
-// 记录"本提供者感知的堆起点": 构造时 (首次分配前) 的断点位置。
-// 之后所有本库申请的块都位于 [heap_start_, ...) 内, 用于 owns_address 校验。
-SbrkMemory::SbrkMemory() : heap_start_(sbrk(0)) {}
+// 记录"本提供者感知的堆起点与当前断点": 构造时 (首次分配前) 的断点位置。
+// 之后所有本库申请的块都位于 [heap_start_, cur_break_) 内, 用于 owns_address
+// 校验。独占堆契约 (README"已知限制") 下本库是唯一 sbrk 使用者, 因此
+// cur_break_ 由 allocate/release_block 同步维护, owns_address 不必调 sbrk(0)。
+SbrkMemory::SbrkMemory() : heap_start_(sbrk(0)), cur_break_(sbrk(0)) {}
 
 void* SbrkMemory::allocate(size_t size)
 {
@@ -31,6 +33,7 @@ void* SbrkMemory::allocate(size_t size)
     {
         return nullptr;
     }
+    cur_break_ = (char*)p + size;  // 同步缓存断点
 #ifdef DEBUG
     alloc_bytes_ += size;
 #endif
@@ -58,6 +61,7 @@ bool SbrkMemory::release_block(void* addr, size_t size)
     {
         return false;
     }
+    cur_break_ = addr;  // 同步缓存断点
 #ifdef DEBUG
     release_bytes_ += size;
 #endif
@@ -75,8 +79,9 @@ SbrkMemory::~SbrkMemory()
 
 bool SbrkMemory::owns_address(const void* addr) const
 {
-    // 地址必须在 [堆起点, 当前断点) 内; 用整数比较避免指针比较 UB
+    // 地址必须在 [堆起点, 当前断点) 内; 用整数比较避免指针比较 UB。
+    // 断点取缓存值 cur_break_ (独占堆契约), 不在热路径调用 sbrk(0)。
     const uintptr_t a = reinterpret_cast<uintptr_t>(addr);
-    return a >= reinterpret_cast<uintptr_t>(heap_start_) && a < reinterpret_cast<uintptr_t>(sbrk(0));
+    return a >= reinterpret_cast<uintptr_t>(heap_start_) && a < reinterpret_cast<uintptr_t>(cur_break_);
 }
 }  // namespace wageco
