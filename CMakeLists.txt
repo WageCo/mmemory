@@ -81,7 +81,9 @@ else()
   message(STATUS "mmemory: namespaced API - exclusive-heap assumption, do NOT mix with system malloc")
 endif()
 
-add_library(mmemory STATIC src/mmemory.cpp src/allocator.cpp src/list.cpp src/log.cpp src/memory.cpp src/tcache.cpp ${MMEMORY_OVERRIDE_SRC})
+# 模板分支 (template_c++11): 依赖 (链表/内存/策略/tcache) 全部编译期注入,
+# 实现定义在头文件 (header-only), 库源只剩装配与日志两个 .cpp
+add_library(mmemory STATIC src/mmemory.cpp src/log.cpp ${MMEMORY_OVERRIDE_SRC})
 target_link_libraries(mmemory PUBLIC ${SPDLOG_LIBS})
 
 # 编译成功后把对外公共头复制到构建目录 (build/include/mmemory.h),
@@ -169,12 +171,8 @@ if(CLANG_FORMAT)
     include/memory.h
     include/tcache.h
     src/mmemory.cpp
-    src/allocator.cpp
-    src/list.cpp
     src/log.cpp
-    src/memory.cpp
     src/override.cpp
-    src/tcache.cpp
     test/unittest_malloc.cpp
     test/bench_malloc.cpp)
   add_custom_target(format

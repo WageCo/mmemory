@@ -349,13 +349,15 @@ TEST(testMalloc, TcacheThreadTest)
 }
 
 // BestFit 查找策略冒烟测试: 验证策略可注入且分配/释放行为正确
-// (使用独立构造的 Allocator + BestFit, 与全局 first-fit 分配器互不干扰)
+// (使用独立构造的 Allocator + BestFit, 与全局 first-fit 分配器互不干扰。
+//  模板分支版: 依赖通过模板实参编译期注入)
 TEST(testMalloc, BestFitTest)
 {
-    wageco::HeaderList free_list(wageco::block_size_of);
+    wageco::HeaderList<wageco::block_size_of> free_list;
     wageco::SbrkMemory memory;
     wageco::BestFit strategy;
-    wageco::Allocator alloc(&free_list, &memory, &strategy);
+    wageco::Allocator<wageco::HeaderList<wageco::block_size_of>, wageco::SbrkMemory, wageco::BestFit> alloc(
+        &free_list, &memory, &strategy);
 
     void* a = alloc.malloc(100);
     ASSERT_NE(a, nullptr);

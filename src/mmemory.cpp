@@ -1,21 +1,23 @@
 // ============================================================================
 // mmemory.cpp - 教学用简易内存分配器: 对外 API (转发到全局分配器)
 // ----------------------------------------------------------------------------
+// 本分支 (template_c++11) 为编译期多态版 (对比 master 的虚函数注入版):
+//   - 依赖 (链表/内存/策略/tcache) 全部通过模板参数注入, 零虚函数;
+//   - 组合根装配的模板实参:
+//       HeaderList<block_size_of>  ← 存储模式 (SizeFn 编译期绑定)
+//       SbrkMemory                 ← 内存申请 (普通类, 非虚方法)
+//       FirstFit                   ← 查找策略 (模板成员 find)
+//       Tcache<1024, 7>            ← 线程本地缓存 (上限/块数模板参数)
+//   - 公共 API (wageco::malloc/free/calloc/realloc/flush_tcache) 与 master
+//     完全一致。
+//
 // 模块结构 (include/ + src/):
-//   internal.h    - 内部共享: ListNode / IList / HeaderList / block_t /
-//                   Allocator / Tcache 声明 + 日志配置
-//   list.cpp      - HeaderList: IList 的具体实现 (双向循环链表)
-//   allocator.cpp - Allocator 核心分配逻辑 (通过注入的 IList* 操作列表)
-//   tcache.cpp    - Tcache: 线程本地小对象缓存 (公共 API 前的快路径)
+//   internal.h    - 内部共享: ListNode / HeaderList / block_t / Allocator /
+//                   Tcache 声明 (模板版全部在头文件) + 日志配置
+//   mmemory.cpp   - 装配 (模板实例化 + thread_local tcache) + 对外 API
 //   log.cpp       - 日志系统实现 (spdlog 封装, 非热路径)
-//   mmemory.cpp   - 装配 (创建链表实现并注入分配器 + thread_local tcache)
-//                   + 四个对外 API (先查 tcache, 未命中再转发到分配器)
 //
-// 依赖注入: 本文件是"组合根"——创建空闲链表实现, 通过 Allocator 构造函数
-//   注入 (策略模式)。以后想换链表实现 (如按大小分 bin),
-//   只需在这里换成新的 IList 实现, 其余代码零改动。
-//
-// 核心思路 (与经典 malloc 实现一脉相承):
+// 核心思路 (与 master 一脉相承, 与经典 malloc 实现同源):
 //   1. 用 sbrk() 系统调用从操作系统申请/归还堆空间;
 //   2. 每块内存前都有一个 header (元数据), 记录块大小与链表节点;
 //   3. Allocator 通过注入的空闲链表 (free_list) 管理空闲块;
@@ -38,25 +40,25 @@
 namespace wageco
 {
 // ----------------------------------------------------------------------------
-// 组合根 (dependency composition root): 装配"存储模式 + 内存申请"并注入分配器
+// 组合根 (dependency composition root): 模板实参注入"存储+内存+策略"
 // ----------------------------------------------------------------------------
-// 空闲块链表实现 (存储模式: 双循环链表, 块大小回调读取; 已分配状态由
-// 块的 inuse 标志标识, 因此不再需要"已分配链表")
-static HeaderList g_free_list(block_size_of);
+// 空闲块链表实现 (存储模式: 双循环链表; SizeFn = block_size_of 编译期绑定,
+// 已分配状态由块的 inuse 标志标识, 因此不再需要"已分配链表")
+static HeaderList<block_size_of> g_free_list;
 
-// 空闲块查找策略 (默认 first-fit; 换 best-fit 只需改这里)
+// 空闲块查找策略 (默认 first-fit; 换 best-fit 只需改这里的模板实参)
 static FirstFit g_first_fit;
 
-// 内存申请来源 (基于 sbrk 的内存提供者)
+// 内存申请来源 (基于 sbrk 的内存提供者, 普通类)
 static SbrkMemory g_memory;
 
-// 全局分配器实例: 注入"存储模式 + 内存申请 + 查找策略"三个依赖
-static Allocator g_allocator(&g_free_list, &g_memory, &g_first_fit);
+// 全局分配器实例: 编译期注入"存储模式 + 内存申请 + 查找策略"三个依赖
+static Allocator<HeaderList<block_size_of>, SbrkMemory, FirstFit> g_allocator(&g_free_list, &g_memory, &g_first_fit);
 
 // ----------------------------------------------------------------------------
 // 线程本地缓存 (tcache): 公共 API 前的 per-thread 快路径
 // ----------------------------------------------------------------------------
-// 小对象 (请求 <= Tcache::kMaxBytes) 的 malloc/free 先查本线程缓存:
+// 小对象 (请求 <= Tcache<>::kMaxBytes) 的 malloc/free 先查本线程缓存:
 // 命中则零锁、零系统调用、零链表查找; 档满时整档倒回全局分配器。
 // 倒回回调 = 全局分配器的 free: 缓存块回到空闲链表, 参与物理合并与
 // 反向释放 —— 缓存只延迟回收, 不阻止回收。
@@ -64,7 +66,7 @@ static Allocator g_allocator(&g_free_list, &g_memory, &g_first_fit);
 // thread_local 析构 (倒回全部缓存块) 先于静态对象析构, 保证倒回时
 // g_allocator 仍存活 (DEBUG 构建的泄漏检测也依赖此顺序)。
 static void drain_to_allocator(block_t* node) { g_allocator.free((void*)(node + 1)); }
-thread_local Tcache tls_cache(drain_to_allocator);
+thread_local Tcache<> tls_cache(drain_to_allocator);
 
 // ----------------------------------------------------------------------------
 // 对外 API: 先查线程本地缓存, 未命中再转发到全局分配器
@@ -73,9 +75,9 @@ void* malloc(size_t size)
 {
     // 快路径: 小对象先查本线程缓存 (零锁 / 零系统调用 / 零链表查找)。
     // size==0 保持分配器的语义 (返回 nullptr), 不走缓存。
-    if (size && Tcache::covers(size))
+    if (size && Tcache<>::covers(size))
     {
-        void* p = tls_cache.pop(Tcache::bin_of_request(size));
+        void* p = tls_cache.pop(Tcache<>::bin_of_request(size));
         if (p)
         {
             return p;
@@ -92,7 +94,7 @@ void free(void* addr)
     }
     block_t* node = (block_t*)addr - 1;  // 回退 16 字节拿到块头
     // 快路径: 小对象压入本线程缓存 (零锁 / 零系统调用)。
-    if (Tcache::covers(node->head.size))
+    if (Tcache<>::covers(node->head.size))
     {
         // 合法性校验 (与 Allocator::free 一致): 地址必须在提供者空间内,
         // 且 inuse 必须为 true (防 double free / 非法指针)。先查地址再读
@@ -103,7 +105,7 @@ void free(void* addr)
             return;
         }
         node->head.inuse = false;  // 标记空闲 (在缓存中)
-        const size_t bin = Tcache::bin_of_block(node->head.size);
+        const size_t bin = Tcache<>::bin_of_block(node->head.size);
         if (tls_cache.full(bin))
         {
             tls_cache.flush_bin(bin);  // 档满: 整档倒回全局分配器再放新块

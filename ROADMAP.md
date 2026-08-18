@@ -4,8 +4,13 @@
 
 - [x] **tcache(线程本地缓存)**:每次分配/释放先命中本线程小缓存,零系统调用、零加锁。
       这是 benchmark 中 ~1870× 差距的最大来源,也是 glibc 的核心优化;
-      (已实现: `include/tcache.h` / `src/tcache.cpp`,公共 API 前的 per-thread
-      快路径,16B 一档共 64 档、每档 7 块;8B 单次分配+释放 9,520 ns → ~11 ns)
+      (已实现: `include/tcache.h`(模板分支为 `Tcache<kMaxBytes, kBinLimit>`),
+      公共 API 前的 per-thread 快路径,16B 一档共 64 档、每档 7 块;
+      8B 单次分配+释放 9,520 ns → ~13 ns)
+- [x] **编译期多态对照(template_c++11 分支)**:用 C++ 模板重写同一分配器,
+      删除虚接口 (IList/IMemory/IFindStrategy),依赖模板参数编译期注入,
+      header-only;与 master 形成"运行时多态 vs 编译期多态"的教学对比
+      (实测同量级:依赖注入方式对性能影响有限,瓶颈在系统调用与锁);
 - [ ] **size-class bin 分级**:空闲链表按大小分桶(如 16/32/64/.../2KB),查找从 O(n)
       降到近似 O(1),替代单一 HeaderList(练习新 `IList` 实现,分配器零改动);
 - [ ] **realloc 缩容分割**:缩容时把多余部分分割挂回空闲链表,回收空间;
