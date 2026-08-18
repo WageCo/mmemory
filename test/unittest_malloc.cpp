@@ -353,10 +353,10 @@ TEST(testMalloc, TcacheThreadTest)
 //  模板分支版: 依赖通过模板实参编译期注入)
 TEST(testMalloc, BestFitTest)
 {
-    wageco::HeaderList<wageco::block_size_of> free_list;
+    wageco::HeaderList<wageco::block_t> free_list;
     wageco::SbrkMemory memory;
     wageco::BestFit strategy;
-    wageco::Allocator<wageco::HeaderList<wageco::block_size_of>, wageco::SbrkMemory, wageco::BestFit> alloc(
+    wageco::Allocator<wageco::HeaderList<wageco::block_t>, wageco::SbrkMemory, wageco::BestFit> alloc(
         &free_list, &memory, &strategy);
 
     void* a = alloc.malloc(100);
@@ -375,5 +375,166 @@ TEST(testMalloc, BestFitTest)
     ASSERT_NE(c, nullptr);
     memset(c, 0x5A, 150);
     alloc.free(c);
+}
+
+// ============================================================================
+// 模板分支演示: HeaderList 真正泛型化 —— 同一份链表代码服务于不同宿主类型
+// ============================================================================
+// 定义一种与 block_t 布局不同的"宿主": 24B 头 (block_t 的 16B + 8B tag)。
+// 只需特化 host_traits<demo_block>, HeaderList 代码零改动即可复用 ——
+// 这正是模板代码生成能力的证明 (同一份源码生成多个实例)。
+namespace
+{
+struct demo_block
+{
+    size_t size;
+    bool inuse;
+    uint64_t tag;  // 演示: 比 block_t 多 8 字节的自定义字段
+};
+
+// demo 宿主: 节点位于头后 sizeof(demo_block) 处 (与 block_t 的偏移不同!)
+inline wageco::ListNode* demo_node_of(demo_block* h)
+{
+    return reinterpret_cast<wageco::ListNode*>(reinterpret_cast<char*>(h) + sizeof(demo_block));
+}
+inline demo_block* demo_block_of(wageco::ListNode* n)
+{
+    return reinterpret_cast<demo_block*>(reinterpret_cast<char*>(n) - sizeof(demo_block));
+}
+inline size_t demo_size_of(const wageco::ListNode* n) { return demo_block_of(const_cast<wageco::ListNode*>(n))->size; }
+
+inline void demo_init_free(demo_block* node, size_t size)
+{
+    node->size = size;
+    node->inuse = false;
+    wageco::ListNode* n = demo_node_of(node);
+    n->pre = n;
+    n->next = n;
+}
+}  // namespace
+
+namespace wageco
+{
+// 特化 host_traits: 让 HeaderList<demo_block> 认识这个新宿主 (编译期适配)
+template <>
+struct host_traits<demo_block>
+{
+    static ListNode* to_node(demo_block* h) { return demo_node_of(h); }
+    static demo_block* to_host(ListNode* n) { return demo_block_of(n); }
+    static size_t size_of(const ListNode* n) { return demo_size_of(n); }
+    static constexpr size_t header_size = sizeof(demo_block);
+};
+}  // namespace wageco
+
+// 泛型链表演示: 用 HeaderList<demo_block> 做增删查 (与 block_t 实例并列),
+// 证明链表代码不绑定任何具体宿主。
+TEST(testMalloc, GenericListTest)
+{
+    wageco::HeaderList<demo_block> list;
+    EXPECT_TRUE(list.empty());
+    EXPECT_EQ(list.size(), 0u);
+
+    demo_block a, b, c;
+    demo_init_free(&a, 64);
+    demo_init_free(&b, 128);
+    demo_init_free(&c, 256);
+    a.tag = 0xAAA;
+    b.tag = 0xBBB;
+    c.tag = 0xCCC;
+
+    // 插入三个节点
+    list.insert(demo_node_of(&a));
+    list.insert(demo_node_of(&b));
+    list.insert(demo_node_of(&c));
+    EXPECT_EQ(list.size(), 3u);
+    EXPECT_FALSE(list.empty());
+
+    // first-fit: 找大小 >= 100 的第一块。insert 是头部插入,
+    // 插入顺序 a, b, c 后表头是 c -> 从头找第一个 >=100 的是 c (256)
+    wageco::ListNode* fit = list.find_first_fit(100);
+    ASSERT_NE(fit, nullptr);
+    EXPECT_EQ(demo_block_of(fit)->tag, 0xCCC);
+
+    // contains
+    EXPECT_TRUE(list.contains(demo_node_of(&b)));
+    EXPECT_FALSE(list.contains(nullptr));
+
+    // BestFit 也能工作 (通过 ListT::traits 取大小)
+    wageco::BestFit best;
+    wageco::ListNode* bfit = best.find(list, 200);
+    ASSERT_NE(bfit, nullptr);
+    EXPECT_EQ(demo_block_of(bfit)->tag, 0xCCC);  // 256 是 >=200 的最小块
+
+    // remove 后 size 递减
+    list.remove(demo_node_of(&b));
+    EXPECT_EQ(list.size(), 2u);
+    EXPECT_FALSE(list.contains(demo_node_of(&b)));
+
+    // 物理相邻: 手工构造连续布局 —— d0 的用户区末尾紧贴 d1 的起始
+    // [d0 header(24B) | d0 用户区(32B) | d1 header(24B) | d1 用户区(48B)]
+    char buf[sizeof(demo_block) + 32 + sizeof(demo_block) + 48];
+    demo_block* d0 = reinterpret_cast<demo_block*>(buf);
+    demo_block* d1 = reinterpret_cast<demo_block*>(buf + sizeof(demo_block) + 32);
+    demo_init_free(d0, 32);
+    demo_init_free(d1, 48);
+    wageco::HeaderList<demo_block> contig;
+    contig.insert(demo_node_of(d1));
+    contig.insert(demo_node_of(d0));
+    wageco::ListNode* next = contig.find_next_phys(demo_node_of(d0));
+    ASSERT_NE(next, nullptr);
+    EXPECT_EQ(demo_block_of(next), d1);
+}
+// ============================================================================
+// 模板分支演示: 编译期能力分派 (tag dispatch)
+// ============================================================================
+// 定义一个"支持随机释放"的假提供者并特化 memory_traits —— Allocator 的
+// 释放路径在编译期切换到 release_dispatch(std::true_type) (直接归还),
+// 反向释放循环 (std::false_type) 不会被实例化。通过 release_calls 计数
+// 证明走的是随机释放路径 (运行时零分支)。
+namespace
+{
+struct DummyRandomMemory
+{
+    void* base;
+    size_t size;
+    int release_calls = 0;
+
+    void* allocate(size_t) { return base; }
+    bool release_block(void*, size_t)
+    {
+        ++release_calls;
+        return true;
+    }
+    bool owns_address(const void* p) const { return p >= base && p < (char*)base + size; }
+};
+}  // namespace
+
+namespace wageco
+{
+// 特化: 声明该提供者"支持随机释放" (编译期能力)
+template <>
+struct memory_traits<DummyRandomMemory>
+{
+    static constexpr bool random_release = true;
+};
+}  // namespace wageco
+
+TEST(testMalloc, CompileTimeDispatchTest)
+{
+    // 一块假堆: 手工放一个 block_t, 假装是已分配块
+    char raw[64] alignas(wageco::block_t);
+    wageco::block_t* node = reinterpret_cast<wageco::block_t*>(raw);
+    node->head.size = 16;
+    node->head.inuse = true;
+
+    DummyRandomMemory mem{raw, sizeof(raw), 0};
+    wageco::HeaderList<wageco::block_t> list;
+    wageco::FirstFit strat;
+    wageco::Allocator<wageco::HeaderList<wageco::block_t>, DummyRandomMemory, wageco::FirstFit> alloc(&list, &mem,
+                                                                                                      &strat);
+
+    alloc.free((void*)(node + 1));
+    // 编译期选中"随机释放"路径: 直接 release_block, 而不是反向释放循环
+    EXPECT_EQ(mem.release_calls, 1);
 }
 #endif  // MMEMORY_TEST_CUSTOM

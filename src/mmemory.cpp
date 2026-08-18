@@ -42,18 +42,20 @@ namespace wageco
 // ----------------------------------------------------------------------------
 // 组合根 (dependency composition root): 模板实参注入"存储+内存+策略"
 // ----------------------------------------------------------------------------
-// 空闲块链表实现 (存储模式: 双循环链表; SizeFn = block_size_of 编译期绑定,
-// 已分配状态由块的 inuse 标志标识, 因此不再需要"已分配链表")
-static HeaderList<block_size_of> g_free_list;
+// 空闲块链表实现 (存储模式: 双循环链表, 宿主 = block_t —— 节点↔宿主互转/
+// 取大小由 host_traits<block_t> 编译期提供; 已分配状态由块的 inuse 标志
+// 标识, 因此不再需要"已分配链表")
+static HeaderList<block_t> g_free_list;
 
 // 空闲块查找策略 (默认 first-fit; 换 best-fit 只需改这里的模板实参)
 static FirstFit g_first_fit;
 
-// 内存申请来源 (基于 sbrk 的内存提供者, 普通类)
+// 内存申请来源 (基于 sbrk 的内存提供者, 普通类;
+// 能力由 memory_traits<SbrkMemory> 编译期描述: 非随机释放)
 static SbrkMemory g_memory;
 
 // 全局分配器实例: 编译期注入"存储模式 + 内存申请 + 查找策略"三个依赖
-static Allocator<HeaderList<block_size_of>, SbrkMemory, FirstFit> g_allocator(&g_free_list, &g_memory, &g_first_fit);
+static Allocator<HeaderList<block_t>, SbrkMemory, FirstFit> g_allocator(&g_free_list, &g_memory, &g_first_fit);
 
 // ----------------------------------------------------------------------------
 // 线程本地缓存 (tcache): 公共 API 前的 per-thread 快路径

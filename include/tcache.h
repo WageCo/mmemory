@@ -35,6 +35,11 @@ template <size_t kMaxBytes = 1024, size_t kBinLimit = 7>
 class Tcache
 {
    public:
+    // 编译期约束: 模板参数非法时给出可读诊断 (而不是算出一个坏数组)
+    static_assert(kMaxBytes % align_to == 0, "kMaxBytes 必须是 16 的倍数 (对齐粒度)");
+    static_assert(kMaxBytes >= align_to, "kMaxBytes 至少为 16");
+    static_assert(kBinLimit > 0, "kBinLimit 必须大于 0");
+
     // 档数 = 上限 / 对齐粒度 (16B 一档): 1024/16 = 64 档 (16B ~ 1024B)
     static constexpr size_t kBinCount = kMaxBytes / align_to;
 

@@ -14,7 +14,7 @@
 
 #include <stddef.h>  // size_t
 
-#include "block.h"  // block_size_of / ListNode (BestFit 需要比较块大小)
+#include "block.h"  // ListNode (BestFit 需要节点类型)
 
 namespace wageco
 {
@@ -36,16 +36,19 @@ struct FirstFit
 // ----------------------------------------------------------------------------
 struct BestFit
 {
-    // 模板成员: 编译期绑定任意链表类型 (只需有 for_each(可调用))
+    // 模板成员: 编译期绑定任意链表类型 (只需有 for_each(可调用))。
+    // 节点大小的获取通过 ListT::traits (host_traits) —— 与链表共享同一份
+    // 宿主适配, 因此 BestFit 也自动支持任意宿主类型 (泛型化)。
     template <typename ListT>
     ListNode* find(ListT& free_list, size_t size) const
     {
+        using traits = typename ListT::traits;
         ListNode* best = nullptr;
         size_t best_size = 0;
         free_list.for_each(
             [&](ListNode* node)
             {
-                size_t node_size = block_size_of(node);
+                size_t node_size = traits::size_of(node);
                 if (node_size >= size && (!best || node_size < best_size))
                 {
                     best = node;

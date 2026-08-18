@@ -6,8 +6,10 @@ A simple memory allocator. 自我学习用简易内存分配器。
 
 > **本分支 (template_c++11)**:编译期多态版 —— 用 C++ 模板 (header-only) 实现
 > 同一个分配器,删除 master 分支的全部虚函数接口 (`IList`/`IMemory`/
-> `IFindStrategy`),依赖通过模板参数编译期注入。算法逻辑与 master 完全一致,
-> 差异仅在"运行时多态 vs 编译期多态",详见"设计"章节。
+> `IFindStrategy`),依赖通过模板参数编译期注入,并用上模板独有的编译期
+> 能力 (能力 trait 分派、SFINAE 接口约束、host_traits 宿主泛型化)。
+> 算法逻辑与 master 完全一致,差异在"运行时多态 vs 编译期多态",
+> 详见"设计"章节。
 
 实属逆向优化 :D —— 自我学习为主,不求性能,只求把原理学明白。
 
@@ -56,20 +58,24 @@ calloc = malloc + 清零 (含溢出检查);  realloc = 扩容时新分配 + 拷�
 
 > **本分支 (template_c++11) 为编译期多态版**:master 分支用三个虚接口
 > (`IList`/`IMemory`/`IFindStrategy`) 做**运行时**依赖注入;本分支删除全部
-> 虚接口,依赖通过**模板参数编译期注入**(零虚函数调用开销,实现全部
-> header-only)。算法逻辑与 master 完全一致,差异仅在"如何注入依赖"。
+> 虚接口,依赖通过**模板参数编译期注入**(实现全部 header-only)。
+> 算法逻辑与 master 完全一致,但模板版进一步用上了**模板独有的编译期能力**
+> (见下"模板真正用在哪"):编译期能力分派、编译期接口约束、宿主泛型化。
 
 ```
 ListNode               链表节点 (pre/next, 独立定义; 复用空闲块用户区前 16B)
    ↑
-HeaderList<SizeFn>      双向循环链表模板 (唯一的一条"空闲链表"; 块大小回调
-                        SizeFn 是编译期模板参数, 如 HeaderList<block_size_of>)
+HeaderList<HostT>      泛型双向循环链表模板 (唯一的一条"空闲链表")
+                       HostT = 宿主类型 (如 block_t); 节点↔宿主互转/取大小/
+                       头大小由 host_traits<HostT> 编译期适配 —— 换宿主只
+                       需特化 host_traits, 链表代码零改动
 
 SbrkMemory              基于 sbrk/brk 的内存提供者 (普通类, 方法非虚)
   ├─ allocate(size)                       申请
-  ├─ supports_random_release()            是否支持随机释放 (sbrk 栈式: false)
   ├─ release_block(addr, size)            归还一块 (随机/反向由提供者决定)
-  └─ owns_address(addr)                   地址是否在本提供者空间内 (free 校验)
+  ├─ owns_address(addr)                   地址是否在本提供者空间内 (free 校验)
+  └─ 能力由 memory_traits<SbrkMemory> 编译期声明: 非随机释放
+     (取代运行时 supports_random_release(), 释放路径编译期分派)
 
 查找策略 (普通 struct, find 是模板成员函数, 编译期鸭子类型)
   ├─ FirstFit : 第一个 size>=需求 的块 (快)
@@ -78,10 +84,11 @@ SbrkMemory              基于 sbrk/brk 的内存提供者 (普通类, 方法非
 Tcache<kMaxBytes, kBinLimit>  线程本地小对象缓存模板 (公共 API 前的快路径)
   ├─ 档位 = 对齐后用户区大小: 16/32/.../kMaxBytes, 每档最多 kBinLimit 块
   ├─ 命中: 零锁、零系统调用、零链表查找 (malloc/free 都是 O(1))
-  └─ 档满: 整档倒回全局分配器 (缓存只延迟回收, 不阻止回收)
+  ├─ 档满: 整档倒回全局分配器 (缓存只延迟回收, 不阻止回收)
+  └─ 编译期约束: 模板参数非法 (非 16 倍数/为 0) 直接编译报错
 
 Allocator<ListT, MemoryT, StrategyT>   ← 三个依赖编译期注入 (模板实参)
-   ↑
+   ↑ 编译期接口约束 (SFINAE + static_assert): 依赖类型必须提供关键成员
 wageco::malloc/free/calloc/realloc    ← tcache 快路径 + 转发到全局 g_allocator
 ```
 
@@ -94,9 +101,34 @@ wageco::malloc/free/calloc/realloc    ← tcache 快路径 + 转发到全局 g_a
 **可替换性(换依赖 = 换模板实参,分配器零改动)**:
 
 - 换存储模式(如按大小分 bin)→ 提供新的 `ListT`(符合接口形状即可),组合根换模板实参;
-- 换内存策略(如 mmap 大块映射,支持随机释放)→ 提供新的 `MemoryT`,组合根换模板实参;
+- 换内存策略(如 mmap 大块映射,支持随机释放)→ 提供新的 `MemoryT` + 特化 `memory_traits<MemoryT>`(编译期声明能力),组合根换模板实参;
 - 换查找策略(FirstFit ↔ BestFit)→ 组合根换模板实参即可;
 - `src/mmemory.cpp` 是唯一装配点(组合根,模板实例化)。
+
+### 模板真正用在哪(本分支与"机械替换"的区别)
+
+模板不只是把虚函数调用换成模板调用——它用上了三个运行时多态做不到的
+编译期能力:
+
+1. **编译期能力分派 (tag dispatch)**:"是否支持随机释放"是提供者类型的
+   固有属性,由 `memory_traits<MemoryT>::random_release` 编译期声明;
+   `Allocator::free` 用 `release_dispatch(..., std::integral_constant<...>)`
+   在编译期选择释放路径 —— 未选中的路径**不会被实例化**(死代码消除)。
+   master 版是运行时 `if (supports_random_release())`,两个分支都存在;
+2. **编译期接口约束 (SFINAE + static_assert)**:`Allocator` 的模板参数是
+   "编译期鸭子类型",用 SFINAE 检测依赖类型是否提供 `allocate`/
+   `release_block`/`owns_address`/`find_first_fit`/`insert`/`remove`,
+   不满足时 `static_assert` 给出可读中文诊断 (如 "MemoryT 必须提供:
+   void* allocate(size_t)"),而不是一屏模板实例化错误;
+3. **宿主泛型化 (host_traits)**:`HeaderList<HostT>` 只认识 `ListNode`,
+   如何把节点解释为宿主块由 `host_traits<HostT>` 编译期适配 ——
+   同一份链表代码可服务任意宿主 (测试里有 24B 头的 `demo_block` 演示:
+   仅特化 `host_traits` 就复用全部链表功能),这是模板代码生成能力;
+4. **编译期参数与约束**:`Tcache<kMaxBytes, kBinLimit>` 的档数、档位计算
+   全部编译期求值,非法参数直接编译报错。
+
+这些是"模板版 vs 虚函数版"教学对比的实质:运行时多态把能力留到运行期
+查询、把约束留到运行期失败;编译期多态把两者都提前到编译期。
 
 **线程本地缓存 (tcache)**:公共 API 与全局分配器之间的一层 per-thread 快路径
 (见 `include/tcache.h`,模板 `Tcache<kMaxBytes, kBinLimit>`,默认 1024B/7 块),

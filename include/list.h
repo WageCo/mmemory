@@ -1,13 +1,14 @@
 // ============================================================================
-// list.h - 链表层: ListNode / HeaderList (模板版, 编译期多态)
+// list.h - 链表层: ListNode / host_traits / HeaderList (模板版, 真正泛型)
 // ----------------------------------------------------------------------------
 // 本分支 (template_c++11) 的模板化要点 (对比 master 的虚函数注入版):
-//   - IList 虚接口被删除: 链表不再通过虚函数被调用;
-//   - HeaderList 变成模板, 块大小回调 SizeFn 由模板参数传入
-//     (编译期绑定的函数指针, 替代 master 构造注入的成员函数指针),
-//     方法全部非虚, 调用点编译期绑定, 零虚函数开销;
-//   - for_each 也模板化 (任意可调用对象), 替代 master 的 std::function;
-//   - 代价: 模板定义必须在头文件 (header-only), 失去声明/实现分离。
+//   - IList 虚接口被删除, 依赖通过模板参数编译期注入 (header-only);
+//   - HeaderList 真正泛型化: 模板参数从"块大小回调 SizeFn"提升为
+//     "宿主类型 HostT" —— 链表代码不再认识 block_t, 它只认识 ListNode,
+//     宿主 <-> 节点互转 / 取大小 / 头大小全部由 host_traits<HostT>
+//     适配器在编译期提供。换宿主 (如不同块头布局) 只需特化 host_traits,
+//     链表代码零改动 (同一份代码生成多个实例);
+//   - for_each 模板化 (任意可调用对象), 替代 master 的 std::function。
 // ListNode 保留: 只含 pre/next 链接指针, 独立定义, 与块头解耦。
 // 块头不内嵌链表节点: 空闲块的"用户区前 16 字节"复用为 ListNode
 // (见 block.h 的 node_of 与本头 init_free), 已分配块的用户区完全交给数据。
@@ -18,7 +19,7 @@
 #include <stddef.h>  // size_t
 #include <stdint.h>  // uintptr_t (地址比较, 避免指针比较 UB)
 
-#include "block.h"  // block_t / block_of (node_of 只需 ListNode 前向声明)
+#include "block.h"  // block_t / node_of / block_of / block_size_of
 
 namespace wageco
 {
@@ -33,7 +34,7 @@ struct ListNode
     ListNode* next;  // 后继
 };
 
-// 初始化"空闲"块: 用户区前段复用为链表节点 (节点自环, 等待 insert)
+// 初始化"空闲"块 (block_t 宿主): 用户区前段复用为链表节点 (节点自环)
 // (需要 ListNode 完整定义, 故放在本头; master 版在 block.h)
 inline void init_free(block_t* node, size_t size)
 {
@@ -45,7 +46,28 @@ inline void init_free(block_t* node, size_t size)
 }
 
 // ----------------------------------------------------------------------------
-// HeaderList - 模板版双向循环链表 (编译期注入 SizeFn)
+// host_traits - 宿主类型适配器 (编译期"类型接口")
+// ----------------------------------------------------------------------------
+// 链表只认识 ListNode; 如何把 ListNode 解释为"宿主块"(取宿主指针、取大小、
+// 取头大小) 由 host_traits 提供。这是模板版"泛型化"的核心:
+//   - 对任意宿主类型 HostT 特化 host_traits, 即可复用同一份 HeaderList 代码;
+//   - 默认不提供定义 (强制特化), 编译期保证"宿主必须可适配", 避免忘特化;
+//   - 块头大小 header_size 是编译期常量 —— 物理相邻计算 (地址算术) 依赖它。
+template <typename HostT>
+struct host_traits;
+
+// block_t 宿主: 节点位于头后 sizeof(block_t) 处, 大小即 head.size
+template <>
+struct host_traits<block_t>
+{
+    static ListNode* to_node(block_t* h) { return node_of(h); }
+    static block_t* to_host(ListNode* n) { return block_of(n); }
+    static size_t size_of(const ListNode* n) { return block_size_of(n); }
+    static constexpr size_t header_size = sizeof(block_t);
+};
+
+// ----------------------------------------------------------------------------
+// HeaderList - 泛型双向循环链表 (编译期绑定宿主类型 HostT)
 // ----------------------------------------------------------------------------
 // 循环不变量 (与 master 一致):
 //   - 链表是【循环】的: 头节点的 pre 指向尾节点, 尾节点的 next 指向头节点,
@@ -53,17 +75,19 @@ inline void init_free(block_t* node, size_t size)
 //   - 单节点时, 该节点的 pre == next == 自己 (最小环);
 //   - 空表 head_ == nullptr。
 // 模板参数:
-//   SizeFn - 从链表节点获取其宿主块大小的回调 (编译期函数指针),
-//            由装配点显式提供, 如 HeaderList<block_size_of>。
+//   HostT - 宿主类型 (如 block_t); 节点 <-> 宿主互转/取大小由
+//           host_traits<HostT> 编译期提供。
 // 职责:
 //   - 维护循环链表 (头指针) 与节点计数 count, insert/remove 自动维护计数;
-//   - 块大小通过 SizeFn 模板参数获取, 链表不关心数据如何存放;
+//   - 链表不关心宿主如何存放数据, 一切通过 host_traits<HostT> 访问;
 //   - 扩展点: 以后可按大小分 bin (一个分配器持有多个 HeaderList)、
 //     增加字节总量统计等, 都只需在此类上做增量修改。
-template <size_t (*SizeFn)(const ListNode*)>
+template <typename HostT>
 class HeaderList
 {
    public:
+    using traits = host_traits<HostT>;  // 暴露适配器 (供 BestFit 等外部使用)
+
     HeaderList() = default;
 
     // 是否为空
@@ -72,7 +96,7 @@ class HeaderList
     // 当前节点数
     size_t size() const { return count_; }
 
-    // 把 node 插入链表头部 (node 需先经 init_free 初始化)。
+    // 把 node 插入链表头部 (node 需先经宿主对应的 init_free 初始化)。
     // 循环链表不需要尾指针: 头的前驱即尾。
     void insert(ListNode* node)
     {
@@ -99,8 +123,8 @@ class HeaderList
         }
         ListNode* node = head_;
         // 从头遍历, 跳过所有 size 不足的块; 走到头即停 (循环链表判空)
-        for (; SizeFn(node) < size && node->next != head_; node = node->next);
-        return SizeFn(node) >= size ? node : nullptr;
+        for (; traits::size_of(node) < size && node->next != head_; node = node->next);
+        return traits::size_of(node) >= size ? node : nullptr;
     }
 
     // 判断 node 是否在链表中 (用于 free 的合法性校验)
@@ -116,19 +140,21 @@ class HeaderList
     }
 
     // 物理地址紧邻 node 之前的节点。
-    // 物理相邻判断: 块 p 的末尾 (宿主起始 + header 大小 + 用户区大小) 正好是
+    // 物理相邻判断: 块 p 的末尾 (宿主起始 + 头大小 + 用户区大小) 正好是
     // node 宿主块的起始地址。用于释放时的向前合并 (coalescing)。
+    // 宿主相关计算全部走 host_traits (编译期绑定)。
     ListNode* find_prev_phys(ListNode* node) const
     {
         if (!head_)
         {
             return nullptr;
         }
-        const uintptr_t target = reinterpret_cast<uintptr_t>(block_of(node));
+        const uintptr_t target = reinterpret_cast<uintptr_t>(traits::to_host(node));
         ListNode* p = head_;
         do
         {
-            const uintptr_t p_end = reinterpret_cast<uintptr_t>(block_of(p)) + sizeof(block_t) + SizeFn(p);
+            const uintptr_t p_end =
+                reinterpret_cast<uintptr_t>(traits::to_host(p)) + traits::header_size + traits::size_of(p);
             if (p_end == target)
             {
                 return p;
@@ -146,11 +172,12 @@ class HeaderList
         {
             return nullptr;
         }
-        const uintptr_t node_end = reinterpret_cast<uintptr_t>(block_of(node)) + sizeof(block_t) + SizeFn(node);
+        const uintptr_t node_end =
+            reinterpret_cast<uintptr_t>(traits::to_host(node)) + traits::header_size + traits::size_of(node);
         ListNode* q = head_;
         do
         {
-            if (reinterpret_cast<uintptr_t>(block_of(q)) == node_end)
+            if (reinterpret_cast<uintptr_t>(traits::to_host(q)) == node_end)
             {
                 return q;
             }

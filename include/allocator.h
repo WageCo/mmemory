@@ -1,28 +1,29 @@
 // ============================================================================
-// allocator.h - 分配器层: Allocator (模板版, 编译期多态)
+// allocator.h - 分配器层: Allocator (模板版, 编译期多态 + 能力 trait)
 // ----------------------------------------------------------------------------
 // 本分支 (template_c++11) 的模板化要点 (对比 master 的虚函数注入版):
 //   - IList/IMemory/IFindStrategy 三个虚接口被删除, 依赖改为模板参数:
 //       Allocator<ListT, MemoryT, StrategyT>
 //     三个依赖在编译期绑定具体类型, 零虚函数调用开销;
-//   - 模板参数约束 (编译期鸭子类型):
-//       ListT     需提供 insert/remove/find_first_fit/contains/
-//                 find_prev_phys/find_next_phys/for_each 等非虚方法;
-//       MemoryT   需提供 allocate/supports_random_release/release_block/
-//                 owns_address 等非虚方法;
-//       StrategyT 需提供 find(ListT&, size_t) 模板成员 (见 find_strategy.h);
+//   - 编译期接口约束: 模板参数是"编译期鸭子类型", 用 SFINAE 检测 +
+//     static_assert 在编译期验证依赖类型提供了关键成员, 传错类型得到
+//     可读诊断 (而不是一屏模板错误);
+//   - 编译期能力分派: "是否支持随机释放" 是提供者类型的固有属性,
+//     由 memory_traits<MemoryT>::random_release 编译期声明, 释放路径用
+//     tag dispatch 编译期选择 —— 未选中的路径不会被实例化 (死代码消除),
+//     这是运行时多态做不到的;
 //   - 实现全部在头文件 (模板必须在实例化点可见), 失去声明/实现分离
 //     —— 这是编译期多态的固有代价;
-//   - 职责与算法逻辑与 master 完全一致 (见下方注释), 仅"如何注入依赖"改变。
+//   - 职责与算法逻辑与 master 完全一致 (见下方注释), 仅"如何注入依赖"
+//     与"能力如何表达"改变。
 //
 // 职责 (与 master 相同):
 //   - 只维护"空闲链表" (free_list_, 注入的 ListT);
 //   - 块是否已分配由 block_t 的 inuse 标志标识 (无"已分配链表");
 //   - 分配 (malloc): 空闲链表按策略查找复用, 否则 memory_->allocate 申请;
 //   - 释放 (free): 校验 (owns_address + inuse) → 合并物理相邻空闲块 →
-//     委托 memory_->release_block: 支持随机释放则直接归还; 否则按"申请
-//     顺序反向释放" (release_block 成功时连带下方紧邻空闲块继续反向归还,
-//     失败则挂回空闲链表复用);
+//     委托 memory_->release_block, 释放路径按 memory_traits 编译期分派
+//     (随机释放 vs 按申请顺序反向释放);
 //   - 持有互斥锁 locker_, 保证链表操作与内存申请的组合操作原子性。
 // 全局实例与公共 API 转发见 src/mmemory.cpp。
 // 扩展点: 换存储模式/内存策略/查找策略都只改组合根的模板实参。
@@ -36,17 +37,99 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <type_traits>  // integral_constant / true_type / false_type / declval
+
 #include "find_strategy.h"  // 策略模板 (FirstFit/BestFit)
 #include "list.h"           // HeaderList / ListNode / init_free
 #include "logging.h"        // get_logger / SPDLOG_LOGGER_* 宏
-#include "memory.h"         // SbrkMemory
+#include "memory.h"         // SbrkMemory / memory_traits
 
 namespace wageco
 {
+// ----------------------------------------------------------------------------
+// 编译期接口约束 (SFINAE 检测 + static_assert)
+// ----------------------------------------------------------------------------
+// 模板参数是"编译期鸭子类型": 只要满足接口形状即可。下面的检测 trait 在
+// 编译期验证依赖类型提供了关键成员, static_assert 给出可读诊断。
+template <typename...>
+struct make_void
+{
+    using type = void;
+};
+template <typename... Ts>
+using void_t = typename make_void<Ts...>::type;
+
+// MemoryT 成员检测
+template <typename T, typename = void>
+struct has_allocate : std::false_type
+{
+};
+template <typename T>
+struct has_allocate<T, void_t<decltype(std::declval<T&>().allocate(size_t{}))>> : std::true_type
+{
+};
+
+template <typename T, typename = void>
+struct has_release_block : std::false_type
+{
+};
+template <typename T>
+struct has_release_block<T, void_t<decltype(std::declval<T&>().release_block(std::declval<void*>(), size_t{}))>>
+    : std::true_type
+{
+};
+
+template <typename T, typename = void>
+struct has_owns_address : std::false_type
+{
+};
+template <typename T>
+struct has_owns_address<T, void_t<decltype(std::declval<const T&>().owns_address(std::declval<const void*>()))>>
+    : std::true_type
+{
+};
+
+// ListT 成员检测
+template <typename T, typename = void>
+struct has_find_first_fit : std::false_type
+{
+};
+template <typename T>
+struct has_find_first_fit<T, void_t<decltype(std::declval<const T&>().find_first_fit(size_t{}))>> : std::true_type
+{
+};
+
+template <typename T, typename = void>
+struct has_insert : std::false_type
+{
+};
+template <typename T>
+struct has_insert<T, void_t<decltype(std::declval<T&>().insert(std::declval<ListNode*>()))>> : std::true_type
+{
+};
+
+template <typename T, typename = void>
+struct has_remove : std::false_type
+{
+};
+template <typename T>
+struct has_remove<T, void_t<decltype(std::declval<T&>().remove(std::declval<ListNode*>()))>> : std::true_type
+{
+};
+
 template <typename ListT, typename MemoryT, typename StrategyT>
 class Allocator
 {
    public:
+    // 编译期接口约束: 依赖类型必须满足"接口形状" (鸭子类型)。
+    // 约束失败时给出可读诊断, 而不是一屏模板实例化错误。
+    static_assert(has_allocate<MemoryT>::value, "MemoryT 必须提供: void* allocate(size_t)");
+    static_assert(has_release_block<MemoryT>::value, "MemoryT 必须提供: bool release_block(void*, size_t)");
+    static_assert(has_owns_address<MemoryT>::value, "MemoryT 必须提供: bool owns_address(const void*) const");
+    static_assert(has_find_first_fit<ListT>::value, "ListT 必须提供: ListNode* find_first_fit(size_t) const");
+    static_assert(has_insert<ListT>::value, "ListT 必须提供: void insert(ListNode*)");
+    static_assert(has_remove<ListT>::value, "ListT 必须提供: void remove(ListNode*)");
+
     // 依赖注入 (编译期): "空闲链表"存储模式 + "内存提供者" + "查找策略"
     Allocator(ListT* free_list, MemoryT* memory, StrategyT* strategy)
         : free_list_(free_list), memory_(memory), strategy_(strategy)
@@ -173,45 +256,10 @@ class Allocator
                                 node->head.size);
         }
 
-        // --- 释放: 委托给内存提供者 (能力由提供者决定) ---
-        if (memory_->supports_random_release())
-        {
-            // 支持随机释放: 任何块都能独立归还, 直接释放
-            SPDLOG_LOGGER_TRACE(get_logger(), "free: release block {:p} ({} bytes) to memory provider", (void*)node,
-                                node->head.size);
-            memory_->release_block(node, sizeof(block_t) + node->head.size);
-        }
-        else
-        {
-            // 不支持随机释放 (如 sbrk 栈式): 只能"按申请顺序反向释放" —
-            // release_block 仅对"最后申请的块"成功; 成功后连带其下方紧邻的
-            // 空闲块继续反向归还 (它们在堆中现在也贴住边界了)。
-            block_t* p = node;
-            for (;;)
-            {
-                if (memory_->release_block(p, sizeof(block_t) + p->head.size))
-                {
-                    // 归还成功: 尝试继续反向归还其下方紧邻的空闲块
-                    ListNode* prev_node = free_list_->find_prev_phys(node_of(p));
-                    if (!prev_node)
-                    {
-                        break;  // 没有更多可连带归还的
-                    }
-                    block_t* prev = block_of(prev_node);
-                    free_list_->remove(prev_node);
-                    p = prev;
-                }
-                else
-                {
-                    // 无法归还 (不是最后申请的块): 挂回空闲链表复用
-                    SPDLOG_LOGGER_TRACE(get_logger(), "free: block {:p} (user {} bytes) -> free list", (void*)(p + 1),
-                                        p->head.size);
-                    init_free(p, p->head.size);
-                    free_list_->insert(node_of(p));
-                    break;
-                }
-            }
-        }
+        // --- 释放: 按编译期能力分派 (memory_traits<MemoryT>::random_release) ---
+        // tag dispatch: 未选中的路径在编译期不实例化 (死代码消除),
+        // 这是模板独有能力 —— 运行时多态做不到。
+        release_dispatch(node, std::integral_constant<bool, memory_traits<MemoryT>::random_release>{});
         pthread_mutex_unlock(&locker_);
     }
 
@@ -312,6 +360,49 @@ class Allocator
 #endif
 
    private:
+    // ------------------------------------------------------------------------
+    // 释放路径 (编译期分派, 见 free 的调用点)
+    // ------------------------------------------------------------------------
+    // 支持随机释放的提供者 (std::true_type): 任何块都能独立归还, 直接释放
+    void release_dispatch(block_t* node, std::true_type)
+    {
+        SPDLOG_LOGGER_TRACE(get_logger(), "free: release block {:p} ({} bytes) to memory provider", (void*)node,
+                            node->head.size);
+        memory_->release_block(node, sizeof(block_t) + node->head.size);
+    }
+
+    // 非随机释放提供者 (std::false_type, 如 sbrk): 按"申请顺序反向释放" —
+    // release_block 仅对"最后申请的块"成功; 成功后连带其下方紧邻的空闲块
+    // 继续反向归还 (它们在堆中现在也贴住边界了); 失败挂回空闲链表复用。
+    void release_dispatch(block_t* node, std::false_type)
+    {
+        block_t* p = node;
+        for (;;)
+        {
+            if (memory_->release_block(p, sizeof(block_t) + p->head.size))
+            {
+                // 归还成功: 尝试继续反向归还其下方紧邻的空闲块
+                ListNode* prev_node = free_list_->find_prev_phys(node_of(p));
+                if (!prev_node)
+                {
+                    break;  // 没有更多可连带归还的
+                }
+                block_t* prev = block_of(prev_node);
+                free_list_->remove(prev_node);
+                p = prev;
+            }
+            else
+            {
+                // 无法归还 (不是最后申请的块): 挂回空闲链表复用
+                SPDLOG_LOGGER_TRACE(get_logger(), "free: block {:p} (user {} bytes) -> free list", (void*)(p + 1),
+                                    p->head.size);
+                init_free(p, p->head.size);
+                free_list_->insert(node_of(p));
+                break;
+            }
+        }
+    }
+
     ListT* free_list_;                                    // "空闲块" 存储模式 (模板注入)
     MemoryT* memory_;                                     // 内存申请来源 (模板注入)
     StrategyT* strategy_;                                 // 空闲块查找策略 (模板注入)

@@ -2,16 +2,16 @@
 // memory.h - 内存提供者层: SbrkMemory (模板分支版, 无虚接口, header-only)
 // ----------------------------------------------------------------------------
 // 本分支 (template_c++11) 的模板化要点 (对比 master):
-//   - IMemory 虚接口被删除: 提供者能力契约改由"模板参数约束"表达 ——
-//     Allocator 模板通过具体类型调用 allocate/release_block/owns_address,
-//     编译期绑定, 零虚函数开销;
+//   - IMemory 虚接口被删除: 提供者能力契约改由"编译期 trait + 模板参数约束"
+//     表达 —— 关键能力 (是否支持随机释放) 用 memory_traits 编译期声明,
+//     Allocator 据此编译期分派 (tag dispatch), 未选分支不实例化;
 //   - SbrkMemory 从"实现 IMemory"变为普通类 (方法全部内联在头文件,
 //     与分支的 header-only 风格一致), 语义不变:
-//       - supports_random_release(): 是否支持"随机释放" (sbrk 栈式: false);
 //       - release_block(addr, size): 归还一块内存 ——
 //           非随机提供者 (如 sbrk 栈式): 仅当块末尾(addr+size) 贴住当前边界
 //           (最后申请的块, 申请顺序的反向) 才归还, 否则返回 false;
 //       - owns_address(): 地址是否在本提供者的空间内 (free 合法性粗校验);
+//       - supports_random_release() 已删除 —— 由 memory_traits 编译期取代;
 //   - 断点缓存 (与 master 一致): 独占堆契约下本库是唯一 sbrk 使用者,
 //     缓存"当前断点" cur_break_ (allocate/release_block 时同步更新),
 //     owns_address 只做内存比较, 不在热路径调用 sbrk(0)。
@@ -27,6 +27,23 @@
 
 namespace wageco
 {
+// ----------------------------------------------------------------------------
+// memory_traits - 内存提供者编译期能力 trait
+// ----------------------------------------------------------------------------
+// "是否支持随机释放"是类型的固有属性 (sbrk 恒 false, mmap 恒 true),
+// 用编译期 trait 表达 —— Allocator 据此在编译期分派释放路径
+// (tag dispatch), 未选中的分支不会被实例化。这是模板独有能力,
+// 取代了运行时虚查询 (master 的 IMemory::supports_random_release())。
+template <typename MemoryT>
+struct memory_traits
+{
+    // 默认: 非随机释放 (sbrk 栈式堆); 支持随机释放的提供者特化为 true
+    static constexpr bool random_release = false;
+};
+
+// 未来 mmap 提供者示例:
+//   template <> struct memory_traits<MmapMemory> { static constexpr bool random_release = true; };
+
 // ----------------------------------------------------------------------------
 // SbrkMemory - 基于 sbrk() 的内存提供者 (普通类, 方法全部内联)
 // ----------------------------------------------------------------------------
@@ -56,9 +73,6 @@ class SbrkMemory
 #endif
         return p;
     }
-
-    // 是否支持"随机释放": sbrk 堆是 LIFO 形状, 只能从堆顶往回收缩
-    bool supports_random_release() const { return false; }
 
     // 归还"申请时返回的地址"所对应的块:
     //   - addr 必须是 allocate() 返回的地址 (块起始), 不能是其他地址;

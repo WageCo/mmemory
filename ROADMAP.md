@@ -9,7 +9,10 @@
       8B 单次分配+释放 9,520 ns → ~13 ns)
 - [x] **编译期多态对照(template_c++11 分支)**:用 C++ 模板重写同一分配器,
       删除虚接口 (IList/IMemory/IFindStrategy),依赖模板参数编译期注入,
-      header-only;与 master 形成"运行时多态 vs 编译期多态"的教学对比
+      header-only;并深入用上模板独有能力:memory_traits 编译期能力分派
+      (tag dispatch, 未选路径不实例化)、SFINAE+static_assert 接口约束、
+      host_traits 宿主泛型化 (HeaderList<HostT> 可服务任意宿主);
+      与 master 形成"运行时多态 vs 编译期多态"的教学对比
       (实测同量级:依赖注入方式对性能影响有限,瓶颈在系统调用与锁);
 - [ ] **size-class bin 分级**:空闲链表按大小分桶(如 16/32/64/.../2KB),查找从 O(n)
       降到近似 O(1),替代单一 HeaderList(练习新 `IList` 实现,分配器零改动);
